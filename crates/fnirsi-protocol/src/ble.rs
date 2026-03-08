@@ -56,7 +56,7 @@ const BLE_CMD_START: [u8; 4] = [0xAA, 0x82, 0x00, 0xA7];
 /// - Header: AA 07 04
 /// - 2 bytes LE voltage (÷1000 → volts)
 /// - 2 bytes LE current (÷1000 → amps)
-#[must_use] 
+#[must_use]
 pub fn decode_ble_aa07(data: &[u8]) -> Option<Sample> {
     // Scan for the AA 07 04 header sequence anywhere in the payload.
     for i in 0..data.len().saturating_sub(6) {
@@ -152,10 +152,11 @@ pub async fn connect_and_stream(
     let mut target_peripheral = None;
     for p in adapter.peripherals().await? {
         if let Some(props) = p.properties().await?
-            && props.address.to_string() == address {
-                target_peripheral = Some(p);
-                break;
-            }
+            && props.address.to_string() == address
+        {
+            target_peripheral = Some(p);
+            break;
+        }
     }
 
     let peripheral = target_peripheral.ok_or(BleError::DeviceNotFound)?;
@@ -198,9 +199,10 @@ pub async fn connect_and_stream(
     tokio::spawn(async move {
         while let Some(notification) = notification_stream.next().await {
             if let Some(sample) = decode_ble_aa07(&notification.value)
-                && tx.send(sample).await.is_err() {
-                    break;
-                }
+                && tx.send(sample).await.is_err()
+            {
+                break;
+            }
         }
         warn!("BLE notification stream ended");
         // Move peripheral into the closure so the BLE connection stays

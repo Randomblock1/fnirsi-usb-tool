@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "FNIRSI USB power meter protocol library"
 
+[features]
+default = ["parquet"]
+parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
+
 [dependencies]
 hidapi = "2"
 btleplug = "0.11"
@@ -18,7 +22,10 @@ futures-util = "0.3"
 anyhow = "1.0"
 csv = "1.4"
 rust_xlsxwriter = "0.94.0"
-calamine = "0.33.0"
+calamine = "0.34.0"
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
+parquet = { version = "58", features = ["arrow"], optional = true }
 
 [lints]
 workspace = true

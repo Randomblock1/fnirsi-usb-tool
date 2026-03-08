@@ -36,7 +36,7 @@ static DFU_CRC: Crc<u8> = Crc::<u8>::new(&CRC8_DFU);
 ///
 /// The CRC covers bytes 1..63 of the 64-byte packet (skipping the 0xAA header
 /// and the final CRC byte).
-#[must_use] 
+#[must_use]
 pub fn data_crc(data: &[u8]) -> u8 {
     DATA_CRC.checksum(data)
 }
@@ -45,7 +45,7 @@ pub fn data_crc(data: &[u8]) -> u8 {
 ///
 /// The CRC covers bytes 0..63 of the 64-byte HID buffer (everything except the
 /// last byte which holds the CRC).
-#[must_use] 
+#[must_use]
 pub fn dfu_crc(data: &[u8]) -> u8 {
     DFU_CRC.checksum(data)
 }
@@ -53,7 +53,7 @@ pub fn dfu_crc(data: &[u8]) -> u8 {
 /// Validate a 64-byte data packet's CRC.
 ///
 /// Checks bytes 1..62 against byte 63.
-#[must_use] 
+#[must_use]
 pub fn validate_data_packet(packet: &[u8; 64]) -> bool {
     let expected = packet[63];
     let computed = data_crc(&packet[1..63]);

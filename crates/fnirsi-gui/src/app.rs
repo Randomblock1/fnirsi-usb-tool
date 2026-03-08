@@ -3,8 +3,11 @@ use eframe::egui;
 use fnirsi_protocol::{
     DeviceType, ble, cfn, csv_utils, device::DeviceInfo, sample::Sample, usb::UsbDevice,
 };
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+const APP_TITLE: &str = "FNIRSI Power Meter";
 
 /// Messages sent from the reader thread to the GUI.
 pub enum DeviceMessage {
@@ -36,6 +39,8 @@ pub enum ExportFormat {
     Csv,
     Jsonl,
     Xlsx,
+    #[cfg(feature = "parquet")]
+    Parquet,
 }
 
 impl ExportFormat {
@@ -44,6 +49,8 @@ impl ExportFormat {
             Self::Csv => "CSV (.csv)",
             Self::Jsonl => "JSON Lines (.jsonl)",
             Self::Xlsx => "Excel Spreadsheet (.xlsx)",
+            #[cfg(feature = "parquet")]
+            Self::Parquet => "Parquet (.parquet)",
         }
     }
 
@@ -52,6 +59,8 @@ impl ExportFormat {
             Self::Csv => "csv",
             Self::Jsonl => "jsonl",
             Self::Xlsx => "xlsx",
+            #[cfg(feature = "parquet")]
+            Self::Parquet => "parquet",
         }
     }
 
@@ -60,6 +69,8 @@ impl ExportFormat {
             Self::Csv => "fnirsi_log.csv",
             Self::Jsonl => "fnirsi_log.jsonl",
             Self::Xlsx => "fnirsi_log.xlsx",
+            #[cfg(feature = "parquet")]
+            Self::Parquet => "fnirsi_log.parquet",
         }
     }
 }
@@ -119,6 +130,7 @@ pub struct FnirsiApp {
     show_temperature: bool,
     show_energy: bool,
     show_capacity: bool,
+    lod_enabled: bool,
     circular_buffer: bool,
     paused: bool,
     connection_mode: ConnectionMode,
@@ -134,6 +146,12 @@ pub struct FnirsiApp {
     recording_ms: u64,
     /// Absolute timestamp (ms) when the current duration measurement started.
     duration_start_ms: u64,
+    /// Imported file name shown in the native window title.
+    imported_file_name: Option<String>,
+    /// Imported file stem reused as the default export basename.
+    imported_file_stem: Option<String>,
+    /// Last native window title applied to avoid redundant viewport commands.
+    last_window_title: String,
 }
 
 impl FnirsiApp {
@@ -159,6 +177,7 @@ impl FnirsiApp {
             show_temperature: true,
             show_energy: false,
             show_capacity: false,
+            lod_enabled: true,
             circular_buffer: true,
             paused: false,
             connection_mode: ConnectionMode::Usb,
@@ -168,6 +187,47 @@ impl FnirsiApp {
             duration_limit: None,
             recording_ms: 0,
             duration_start_ms: 0,
+            imported_file_name: None,
+            imported_file_stem: None,
+            last_window_title: APP_TITLE.to_string(),
+        }
+    }
+
+    fn window_title(&self) -> String {
+        match &self.imported_file_name {
+            Some(name) => format!("{APP_TITLE} - {name}"),
+            None => APP_TITLE.to_string(),
+        }
+    }
+
+    fn sync_window_title(&mut self, ctx: &egui::Context) {
+        let title = self.window_title();
+        if title != self.last_window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_window_title = title;
+        }
+    }
+
+    fn clear_imported_file(&mut self) {
+        self.imported_file_name = None;
+        self.imported_file_stem = None;
+    }
+
+    fn set_imported_file(&mut self, path: &Path) {
+        self.imported_file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
+        self.imported_file_stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_owned);
+    }
+
+    fn export_default_filename(&self, fmt: ExportFormat) -> String {
+        match &self.imported_file_stem {
+            Some(stem) if !stem.is_empty() => format!("{stem}.{}", fmt.extension()),
+            _ => fmt.default_filename().to_string(),
         }
     }
 
@@ -212,6 +272,7 @@ impl FnirsiApp {
         self.capacity_as = 0.0;
         self.duration_start_ms = self.recording_ms;
         self.plots.clear();
+        self.clear_imported_file();
     }
 
     /// Export the current buffer in the specified format via a save dialog.
@@ -225,7 +286,7 @@ impl FnirsiApp {
         let file = rfd::FileDialog::new()
             .set_title(fmt.label())
             .add_filter(fmt.label(), &[ext])
-            .set_file_name(fmt.default_filename())
+            .set_file_name(self.export_default_filename(fmt))
             .save_file();
 
         if let Some(path) = file {
@@ -234,6 +295,8 @@ impl FnirsiApp {
                 ExportFormat::Csv => csv_utils::write_csv(&path, filtered, true),
                 ExportFormat::Jsonl => csv_utils::write_jsonl(&path, filtered, true),
                 ExportFormat::Xlsx => csv_utils::write_xlsx(&path, filtered, true),
+                #[cfg(feature = "parquet")]
+                ExportFormat::Parquet => csv_utils::write_parquet(&path, filtered, true),
             };
             match result {
                 Ok(()) => {
@@ -248,10 +311,15 @@ impl FnirsiApp {
 
     /// Import a data file (CSV, CFN, JSONL, XLSX), disconnecting if necessary.
     fn import_file(&mut self) {
-        let file = rfd::FileDialog::new()
-            .set_title("Import Data File")
-            .add_filter("Data files", &["csv", "cfn", "jsonl", "xlsx"])
-            .pick_file();
+        let dialog = rfd::FileDialog::new().set_title("Import Data File");
+        #[cfg(feature = "parquet")]
+        let dialog = dialog.add_filter(
+            "Data files",
+            &["csv", "cfn", "jsonl", "xlsx", "parquet", "parq"],
+        );
+        #[cfg(not(feature = "parquet"))]
+        let dialog = dialog.add_filter("Data files", &["csv", "cfn", "jsonl", "xlsx"]);
+        let file = dialog.pick_file();
 
         if let Some(path) = file {
             let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -260,6 +328,19 @@ impl FnirsiApp {
                 cfn::read_cfn(&path)
             } else if extension.eq_ignore_ascii_case("xlsx") {
                 csv_utils::read_xlsx(&path).map(|s| (s, 100.0))
+            } else if extension.eq_ignore_ascii_case("parquet")
+                || extension.eq_ignore_ascii_case("parq")
+            {
+                #[cfg(feature = "parquet")]
+                {
+                    csv_utils::read_parquet(&path).map(|s| (s, 100.0))
+                }
+                #[cfg(not(feature = "parquet"))]
+                {
+                    Err(anyhow::anyhow!(
+                        "Parquet support is disabled. Rebuild fnirsi-gui with `--features parquet`."
+                    ))
+                }
             } else if extension.eq_ignore_ascii_case("jsonl") {
                 csv_utils::read_jsonl(&path).map(|s| (s, 100.0))
             } else {
@@ -271,6 +352,7 @@ impl FnirsiApp {
                     tracing::info!("Imported {} samples from {:?}", samples.len(), path);
                     self.disconnect();
                     self.reset_accumulators();
+                    self.set_imported_file(&path);
 
                     let default_dt = 1.0 / sample_rate;
                     let mut prev_sample: Option<Sample> = None;
@@ -419,6 +501,7 @@ impl FnirsiApp {
 impl eframe::App for FnirsiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_messages();
+        self.sync_window_title(ctx);
 
         // Repaint periodically when waiting for connections, otherwise wait for GUI interaction.
         // Use a slower rate when paused (no new data arriving) to reduce unnecessary work.
@@ -552,6 +635,9 @@ impl eframe::App for FnirsiApp {
 
                 ui.checkbox(&mut self.circular_buffer, "Circular")
                     .on_hover_text("If unchecked, stops recording when the plot buffer is full");
+                ui.checkbox(&mut self.lod_enabled, "LOD").on_hover_text(
+                    "Use zoom-aware min/max decimation to improve rendering performance for large datasets. Disable to always draw the full buffer.",
+                );
 
                 // Sample rate selector
                 let divider = RATE_PRESETS[self.rate_preset_idx].0;
@@ -809,6 +895,12 @@ impl eframe::App for FnirsiApp {
                         ExportFormat::Xlsx,
                         ExportFormat::Xlsx.label(),
                     );
+                    #[cfg(feature = "parquet")]
+                    ui.radio_value(
+                        &mut self.export_format,
+                        ExportFormat::Parquet,
+                        ExportFormat::Parquet.label(),
+                    );
                     ui.add_space(8.0);
                     let mut close = false;
                     let mut export_fmt: Option<ExportFormat> = None;
@@ -849,6 +941,7 @@ impl eframe::App for FnirsiApp {
                 show_t,
                 self.show_energy,
                 self.show_capacity,
+                self.lod_enabled,
             );
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {

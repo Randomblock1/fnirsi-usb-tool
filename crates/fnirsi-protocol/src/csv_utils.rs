@@ -1,4 +1,4 @@
-//! Read/write helpers for CSV, JSON Lines, and XLSX sample data.
+//! Read/write helpers for CSV, JSON Lines, XLSX, and optional Parquet sample data.
 
 use crate::sample::Sample;
 use anyhow::Context;
@@ -193,4 +193,225 @@ pub fn read_xlsx(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
     }
 
     Ok(samples)
+}
+
+/// Write samples as Parquet. Available with the `parquet` feature.
+#[cfg(feature = "parquet")]
+pub fn write_parquet<'a>(
+    path: &std::path::Path,
+    samples: impl Iterator<Item = &'a Sample>,
+    include_usb_fields: bool,
+) -> anyhow::Result<()> {
+    use arrow_array::{ArrayRef, Float32Array, RecordBatch, UInt32Array, UInt64Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let samples: Vec<&Sample> = samples.collect();
+
+    let mut fields = vec![
+        Field::new("timestamp_ms", DataType::UInt64, false),
+        Field::new("voltage_v", DataType::Float32, false),
+        Field::new("current_a", DataType::Float32, false),
+        Field::new("power_w", DataType::Float32, false),
+    ];
+    let mut columns: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from(
+            samples
+                .iter()
+                .map(|sample| sample.timestamp_ms)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float32Array::from(
+            samples
+                .iter()
+                .map(|sample| sample.voltage_v)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float32Array::from(
+            samples
+                .iter()
+                .map(|sample| sample.current_a)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float32Array::from(
+            samples
+                .iter()
+                .map(|sample| sample.power_w)
+                .collect::<Vec<_>>(),
+        )),
+    ];
+
+    if include_usb_fields {
+        fields.extend([
+            Field::new("dp_v", DataType::Float32, false),
+            Field::new("dn_v", DataType::Float32, false),
+            Field::new("temp_c", DataType::Float32, false),
+            Field::new("raw_voltage", DataType::UInt32, false),
+            Field::new("raw_current", DataType::UInt32, false),
+        ]);
+        columns.extend([
+            Arc::new(Float32Array::from(
+                samples.iter().map(|sample| sample.dp_v).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(Float32Array::from(
+                samples.iter().map(|sample| sample.dn_v).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float32Array::from(
+                samples
+                    .iter()
+                    .map(|sample| sample.temp_c)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt32Array::from(
+                samples
+                    .iter()
+                    .map(|sample| sample.raw_voltage)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt32Array::from(
+                samples
+                    .iter()
+                    .map(|sample| sample.raw_current)
+                    .collect::<Vec<_>>(),
+            )),
+        ]);
+    }
+
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(Arc::clone(&schema), columns)?;
+    let file = std::fs::File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+/// Read samples from a Parquet file. Available with the `parquet` feature.
+#[cfg(feature = "parquet")]
+pub fn read_parquet(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
+    use arrow_array::{
+        Array, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch, UInt32Array,
+        UInt64Array,
+    };
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    fn numeric_value(array: &dyn Array, row: usize) -> Option<f64> {
+        if array.is_null(row) {
+            return None;
+        }
+
+        if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
+            Some(f64::from(values.value(row)))
+        } else if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
+            Some(values.value(row))
+        } else if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
+            Some(values.value(row) as f64)
+        } else if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
+            Some(values.value(row) as f64)
+        } else if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+            Some(values.value(row) as f64)
+        } else {
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .map(|values| values.value(row) as f64)
+        }
+    }
+
+    fn column_index(batch: &RecordBatch, name: &str) -> Option<usize> {
+        batch.schema().index_of(name).ok()
+    }
+
+    fn value_at(batch: &RecordBatch, column_idx: Option<usize>, row: usize) -> Option<f64> {
+        column_idx.and_then(|idx| numeric_value(batch.column(idx).as_ref(), row))
+    }
+
+    let file = std::fs::File::open(path)?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+    let mut samples = Vec::new();
+
+    for batch in reader {
+        let batch = batch?;
+        let timestamp_col = column_index(&batch, "timestamp_ms");
+        let voltage_col = column_index(&batch, "voltage_v");
+        let current_col = column_index(&batch, "current_a");
+        let power_col = column_index(&batch, "power_w");
+        let dp_col = column_index(&batch, "dp_v");
+        let dn_col = column_index(&batch, "dn_v");
+        let temp_col = column_index(&batch, "temp_c");
+        let raw_voltage_col = column_index(&batch, "raw_voltage");
+        let raw_current_col = column_index(&batch, "raw_current");
+
+        for row in 0..batch.num_rows() {
+            samples.push(Sample {
+                timestamp_ms: value_at(&batch, timestamp_col, row).unwrap_or(0.0) as u64,
+                voltage_v: value_at(&batch, voltage_col, row).unwrap_or(0.0) as f32,
+                current_a: value_at(&batch, current_col, row).unwrap_or(0.0) as f32,
+                power_w: value_at(&batch, power_col, row).unwrap_or(0.0) as f32,
+                dp_v: value_at(&batch, dp_col, row).unwrap_or(0.0) as f32,
+                dn_v: value_at(&batch, dn_col, row).unwrap_or(0.0) as f32,
+                temp_c: value_at(&batch, temp_col, row).unwrap_or(0.0) as f32,
+                raw_voltage: value_at(&batch, raw_voltage_col, row).unwrap_or(0.0) as u32,
+                raw_current: value_at(&batch, raw_current_col, row).unwrap_or(0.0) as u32,
+            });
+        }
+    }
+
+    Ok(samples)
+}
+
+#[cfg(all(test, feature = "parquet"))]
+mod tests {
+    use super::{read_parquet, write_parquet};
+    use crate::sample::Sample;
+
+    #[test]
+    fn parquet_round_trip_preserves_samples() {
+        let samples = [
+            Sample {
+                timestamp_ms: 100,
+                voltage_v: 5.1,
+                current_a: 1.2,
+                power_w: 6.12,
+                dp_v: 0.8,
+                dn_v: 0.1,
+                temp_c: 31.5,
+                raw_voltage: 510_000,
+                raw_current: 120_000,
+            },
+            Sample {
+                timestamp_ms: 110,
+                voltage_v: 9.0,
+                current_a: 2.0,
+                power_w: 18.0,
+                dp_v: 0.0,
+                dn_v: 0.0,
+                temp_c: 32.0,
+                raw_voltage: 900_000,
+                raw_current: 200_000,
+            },
+        ];
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fnirsi-protocol-{unique}-{}.parquet",
+            std::process::id()
+        ));
+
+        write_parquet(&path, samples.iter(), true).unwrap();
+        let decoded = read_parquet(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), samples.len());
+        assert_eq!(decoded[0].timestamp_ms, samples[0].timestamp_ms);
+        assert_eq!(decoded[0].raw_current, samples[0].raw_current);
+        assert_eq!(decoded[1].timestamp_ms, samples[1].timestamp_ms);
+        assert_eq!(decoded[1].raw_voltage, samples[1].raw_voltage);
+        assert!((decoded[0].voltage_v - samples[0].voltage_v).abs() < f32::EPSILON);
+        assert!((decoded[1].power_w - samples[1].power_w).abs() < f32::EPSILON);
+    }
 }

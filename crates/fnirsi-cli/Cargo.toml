@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "FNIRSI USB power meter CLI tool"
 
+[features]
+default = []
+parquet = ["fnirsi-protocol/parquet"]
+
 [dependencies]
 fnirsi-protocol = { path = "../fnirsi-protocol" }
 clap = { version = "4", features = ["derive"] }

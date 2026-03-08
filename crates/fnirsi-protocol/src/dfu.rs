@@ -117,8 +117,10 @@ pub fn flash_firmware(
         let i = chunk_id + 1;
         let i_low = (i & 0xFF) as u8;
         let i_high = ((i >> 8) & 0xFF) as u8;
-        let addr: u32 =
-            (0x3A) | (((i % 0x32) as u32) << 8) | (u32::from(i_high) << 16) | (u32::from(i_low) << 24);
+        let addr: u32 = (0x3A)
+            | (((i % 0x32) as u32) << 8)
+            | (u32::from(i_high) << 16)
+            | (u32::from(i_low) << 24);
 
         let pkt = make_dfu_packet(EP_WRITE_DATA, addr, chunk);
         write_and_wait_response(device, &pkt, WRITE_TIMEOUT)?;
@@ -151,8 +153,7 @@ fn write_and_wait_response(
 
     // Read response
     let mut response = [0u8; PACKET_SIZE];
-    let n = device
-        .read_timeout(&mut response, timeout.as_millis() as i32)?;
+    let n = device.read_timeout(&mut response, timeout.as_millis() as i32)?;
 
     if n == 0 {
         return Err(DfuError::NoResponse);

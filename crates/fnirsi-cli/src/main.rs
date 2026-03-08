@@ -49,11 +49,12 @@ enum Commands {
     ///   .csv   → CSV
     ///   .jsonl → JSON Lines
     ///   .xlsx  → Excel Spreadsheet
+    ///   .parquet → Parquet (when built with `--features parquet`)
     ///
     /// If --output is not given, tab-separated text is printed to stdout.
     /// Use --json to print JSON Lines to stdout instead.
     Log {
-        /// Output file path. Format inferred from extension (.csv, .jsonl, .xlsx).
+        /// Output file path. Format inferred from extension (.csv, .jsonl, .xlsx, .parquet).
         #[arg(long)]
         output: Option<PathBuf>,
 
@@ -95,11 +96,12 @@ enum Commands {
     ///   .csv   → CSV (default)
     ///   .jsonl → JSON Lines
     ///   .xlsx  → Excel Spreadsheet
+    ///   .parquet → Parquet (when built with `--features parquet`)
     Convert {
-        /// Input file path (.cfn).
+        /// Input file path (.cfn, .csv, .jsonl, .xlsx, .parquet).
         input: PathBuf,
 
-        /// Output file path (.csv, .jsonl, .xlsx).
+        /// Output file path (.csv, .jsonl, .xlsx, .parquet).
         output: PathBuf,
     },
 }
@@ -220,6 +222,8 @@ enum OutputFormat {
     Csv,
     Jsonl,
     Xlsx,
+    #[cfg(feature = "parquet")]
+    Parquet,
     /// JSON Lines written to stdout.
     JsonStdout,
     /// Tab-separated written to stdout.
@@ -237,10 +241,33 @@ impl OutputFormat {
             "csv" => Ok(Self::Csv),
             "jsonl" | "ndjson" => Ok(Self::Jsonl),
             "xlsx" => Ok(Self::Xlsx),
+            "parquet" | "parq" => {
+                #[cfg(feature = "parquet")]
+                {
+                    Ok(Self::Parquet)
+                }
+                #[cfg(not(feature = "parquet"))]
+                {
+                    anyhow::bail!(
+                        "Parquet support is disabled. Rebuild fnirsi-cli with `--features parquet`."
+                    )
+                }
+            }
             other => {
-                anyhow::bail!("Unknown output extension '.{other}'. Use .csv, .jsonl, or .xlsx.")
+                anyhow::bail!(
+                    "Unknown output extension '.{other}'. Use {}.",
+                    supported_output_extensions()
+                )
             }
         }
+    }
+}
+
+fn supported_output_extensions() -> &'static str {
+    if cfg!(feature = "parquet") {
+        ".csv, .jsonl, .xlsx, or .parquet"
+    } else {
+        ".csv, .jsonl, or .xlsx"
     }
 }
 
@@ -251,14 +278,14 @@ struct LogOutput {
     include_usb_fields: bool,
     csv_writer: Option<csv::Writer<std::fs::File>>,
     jsonl_writer: Option<std::io::BufWriter<std::fs::File>>,
-    xlsx_path: Option<PathBuf>,
-    xlsx_samples: Vec<Sample>,
+    buffered_output_path: Option<PathBuf>,
+    buffered_samples: Vec<Sample>,
 }
 
 impl LogOutput {
     /// Create a new output writer for the given path / stdout mode.
     fn new(output: Option<PathBuf>, json_stdout: bool, include_usb_fields: bool) -> Result<Self> {
-        let (fmt, csv_writer, jsonl_writer, xlsx_path) = if let Some(ref path) = output {
+        let (fmt, csv_writer, jsonl_writer, buffered_output_path) = if let Some(ref path) = output {
             let fmt = OutputFormat::from_path(path)?;
             match fmt {
                 OutputFormat::Csv => {
@@ -270,6 +297,8 @@ impl LogOutput {
                     (fmt, None, Some(std::io::BufWriter::new(f)), None)
                 }
                 OutputFormat::Xlsx => (fmt, None, None, Some(path.clone())),
+                #[cfg(feature = "parquet")]
+                OutputFormat::Parquet => (fmt, None, None, Some(path.clone())),
                 _ => unreachable!(),
             }
         } else {
@@ -286,8 +315,8 @@ impl LogOutput {
             include_usb_fields,
             csv_writer,
             jsonl_writer,
-            xlsx_path,
-            xlsx_samples: Vec::new(),
+            buffered_output_path,
+            buffered_samples: Vec::new(),
         })
     }
 
@@ -316,7 +345,11 @@ impl LogOutput {
                 }
             }
             OutputFormat::Xlsx => {
-                self.xlsx_samples.push(*s);
+                self.buffered_samples.push(*s);
+            }
+            #[cfg(feature = "parquet")]
+            OutputFormat::Parquet => {
+                self.buffered_samples.push(*s);
             }
             OutputFormat::JsonStdout => {
                 if self.include_usb_fields {
@@ -363,12 +396,25 @@ impl LogOutput {
         if let Some(w) = &mut self.jsonl_writer {
             w.flush()?;
         }
-        if let Some(path) = &self.xlsx_path {
-            fnirsi_protocol::csv_utils::write_xlsx(
-                path,
-                self.xlsx_samples.iter(),
-                self.include_usb_fields,
-            )?;
+        if let Some(path) = &self.buffered_output_path {
+            match self.fmt {
+                OutputFormat::Xlsx => {
+                    fnirsi_protocol::csv_utils::write_xlsx(
+                        path,
+                        self.buffered_samples.iter(),
+                        self.include_usb_fields,
+                    )?;
+                }
+                #[cfg(feature = "parquet")]
+                OutputFormat::Parquet => {
+                    fnirsi_protocol::csv_utils::write_parquet(
+                        path,
+                        self.buffered_samples.iter(),
+                        self.include_usb_fields,
+                    )?;
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -671,7 +717,53 @@ fn is_interrupted() -> bool {
     INTERRUPTED.load(Ordering::SeqCst)
 }
 
-/// Convert a `.cfn` offline recording to CSV or JSON Lines.
+fn read_samples_from_path(path: &std::path::Path) -> Result<Vec<Sample>> {
+    let extension = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match extension.as_str() {
+        "cfn" => cfn::read_cfn(path).map(|(samples, _rate)| samples),
+        "csv" => csv_utils::read_csv(path),
+        "jsonl" | "ndjson" => csv_utils::read_jsonl(path),
+        "xlsx" => csv_utils::read_xlsx(path),
+        "parquet" | "parq" => {
+            #[cfg(feature = "parquet")]
+            {
+                csv_utils::read_parquet(path)
+            }
+            #[cfg(not(feature = "parquet"))]
+            {
+                anyhow::bail!(
+                    "Parquet support is disabled. Rebuild fnirsi-cli with `--features parquet`."
+                )
+            }
+        }
+        _ => anyhow::bail!(
+            "Unsupported input file format. Use .cfn, .csv, .jsonl, .xlsx{}.",
+            if cfg!(feature = "parquet") {
+                ", or .parquet"
+            } else {
+                ""
+            }
+        ),
+    }
+}
+
+fn write_samples_to_path(path: &std::path::Path, samples: &[Sample]) -> Result<()> {
+    match OutputFormat::from_path(path)? {
+        OutputFormat::Csv => csv_utils::write_csv(path, samples.iter(), true),
+        OutputFormat::Jsonl => csv_utils::write_jsonl(path, samples.iter(), true),
+        OutputFormat::Xlsx => csv_utils::write_xlsx(path, samples.iter(), true),
+        #[cfg(feature = "parquet")]
+        OutputFormat::Parquet => csv_utils::write_parquet(path, samples.iter(), true),
+        OutputFormat::JsonStdout | OutputFormat::TabStdout => unreachable!(),
+    }
+}
+
+/// Convert a supported recording file to another structured format.
 fn cmd_convert(input: PathBuf, output: PathBuf) -> Result<()> {
     println!(
         "{} {}",
@@ -679,26 +771,10 @@ fn cmd_convert(input: PathBuf, output: PathBuf) -> Result<()> {
         "─".repeat(40).dimmed()
     );
 
-    let extension = input
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
     println!("{} Reading input file: {}", "➤".blue(), input.display());
 
-    let samples = if extension == "cfn" {
-        let (samples, rate) = cfn::read_cfn(&input)?;
-        println!(
-            "  {} Found CFN recording ({} samples, ~{} Hz)",
-            "✓".green(),
-            samples.len(),
-            rate
-        );
-        samples
-    } else {
-        anyhow::bail!("Unsupported input file format. Please provide a .cfn file.");
-    };
+    let samples = read_samples_from_path(&input)?;
+    println!("  {} Loaded {} samples", "✓".green(), samples.len());
 
     let out_ext = output
         .extension()
@@ -713,17 +789,7 @@ fn cmd_convert(input: PathBuf, output: PathBuf) -> Result<()> {
         output.display()
     );
 
-    match out_ext.as_str() {
-        "jsonl" | "ndjson" => {
-            csv_utils::write_jsonl(&output, samples.iter(), true)?;
-        }
-        "xlsx" => {
-            csv_utils::write_xlsx(&output, samples.iter(), true)?;
-        }
-        _ => {
-            csv_utils::write_csv(&output, samples.iter(), true)?;
-        }
-    }
+    write_samples_to_path(&output, &samples)?;
 
     println!("  {} Success!", "✓".green());
     Ok(())

@@ -109,18 +109,20 @@ impl fmt::Display for DeviceInfo {
 
 /// Detect device type from VID/PID, optionally using the product string to
 /// distinguish C1 from FNAC28 (they share VID/PID 0483:003B).
-#[must_use] 
+#[must_use]
 pub fn detect_device_type(vid: u16, pid: u16, product_string: Option<&str>) -> Option<DeviceType> {
     for &(ref id, dtype) in KNOWN_DEVICES {
         if id.vid == vid && id.pid == pid {
             // C1 and FNAC28 share this VID/PID; check the product string.
-            if vid == 0x0483 && pid == 0x003B
-                && let Some(prod) = product_string {
-                    if prod.to_lowercase().contains("c1") {
-                        return Some(DeviceType::C1);
-                    }
-                    return Some(DeviceType::Fnac28);
+            if vid == 0x0483
+                && pid == 0x003B
+                && let Some(prod) = product_string
+            {
+                if prod.to_lowercase().contains("c1") {
+                    return Some(DeviceType::C1);
                 }
+                return Some(DeviceType::Fnac28);
+            }
             return Some(dtype);
         }
     }
@@ -131,7 +133,7 @@ pub fn detect_device_type(vid: u16, pid: u16, product_string: Option<&str>) -> O
 ///
 /// These devices use VID 0x2E3C and require a different initialization sequence
 /// and a 1-second keep-alive interval instead of 3 ms.
-#[must_use] 
+#[must_use]
 pub const fn is_fnb58_variant(device_type: DeviceType) -> bool {
     matches!(device_type, DeviceType::Fnb58 | DeviceType::Fnb48s)
 }

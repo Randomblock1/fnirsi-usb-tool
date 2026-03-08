@@ -17,9 +17,9 @@ An open-source Rust toolkit for [FNIRSI](https://www.fnirsi.cn/) USB power meter
 ## Features
 
 - **Live measurement streaming** — voltage, current, power, D+/D−, temperature at ~100 Hz (USB) or ~10 Hz (BLE)
-- **Multiple export formats** — CSV, JSON Lines (`.jsonl`), and Excel (`.xlsx`)
+- **Multiple export formats** — CSV, JSON Lines (`.jsonl`), Excel (`.xlsx`), and optional Parquet (`.parquet`)
 - **Native GUI** — real-time plots, configurable sample rate decimation, import/export, and energy accumulators (eframe/egui)
-- **Offline recording conversion** — convert FNIRSI `.cfn` files to CSV, JSONL, or XLSX
+- **Offline recording conversion** — convert FNIRSI `.cfn`, CSV, JSONL, XLSX, and optional Parquet files between supported formats
 - **DFU firmware updates** — flash `.ufn` firmware files over USB
 - **Bluetooth LE support** — scan, connect, and stream data wirelessly from BLE-capable devices
 - **CRC validation** — optional packet integrity checking
@@ -42,6 +42,10 @@ Requires a recent [Rust](https://rustup.rs/) toolchain (edition 2024).
 ```bash
 # Build everything
 cargo build --release
+
+# Build the CLI or GUI with optional Parquet support
+cargo build --release -p fnirsi-cli --features parquet
+cargo build --release -p fnirsi-gui --features parquet
 
 # Build just the CLI
 cargo build --release -p fnirsi-cli
@@ -91,6 +95,9 @@ fnirsi-cli log --json
 # Save as JSON Lines to a file
 fnirsi-cli log --output data.jsonl
 
+# Save as Parquet (requires `--features parquet`)
+fnirsi-cli log --output data.parquet
+
 # Stop after 1000 samples
 fnirsi-cli log --output data.csv --max-samples 1000
 
@@ -106,9 +113,10 @@ fnirsi-cli log --crc
 # Convert a CFN recording to CSV
 fnirsi-cli convert recording.cfn output.csv
 
-# Convert to JSON Lines or Excel
+# Convert to JSON Lines, Excel, or Parquet
 fnirsi-cli convert recording.cfn output.jsonl
 fnirsi-cli convert recording.cfn output.xlsx
+fnirsi-cli convert recording.cfn output.parquet
 
 # Flash firmware
 fnirsi-cli flash Fnb58V1.11.ufn
@@ -128,8 +136,8 @@ The GUI provides:
 - Live readouts of V, A, W, D+, D−, and temperature
 - Energy (Wh) and capacity (mAh) accumulators and plots
 - Timed recordings with auto-pause
-- Import `.cfn`, `.csv`, `.jsonl`, and `.xlsx` files for offline viewing
-- Export captured data to CSV, JSON Lines, or Excel
+- Import `.cfn`, `.csv`, `.jsonl`, `.xlsx`, and optional `.parquet` files for offline viewing
+- Export captured data to CSV, JSON Lines, Excel, and optional Parquet
 
 ## Logging
 

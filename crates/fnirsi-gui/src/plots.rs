@@ -12,6 +12,7 @@ pub struct PlotState {
     capacity_mah: VecDeque<f32>,
     sample_capacity: usize,
     index: usize,
+    generation: u64,
     // Cached latest non-NaN values to avoid O(n) reverse scans each frame.
     latest_voltage: Option<f64>,
     latest_current: Option<f64>,
@@ -30,6 +31,7 @@ impl PlotState {
             capacity_mah: VecDeque::with_capacity(capacity),
             sample_capacity: capacity,
             index: 0,
+            generation: 0,
             latest_voltage: None,
             latest_current: None,
             latest_power: None,
@@ -79,6 +81,7 @@ impl PlotState {
         self.energy_wh.clear();
         self.capacity_mah.clear();
         self.index = 0;
+        self.generation += 1;
         self.latest_voltage = None;
         self.latest_current = None;
         self.latest_power = None;
@@ -106,6 +109,17 @@ impl PlotState {
         self.all_samples.len()
     }
 
+    fn visible_x_bounds(plot_ui: &egui_plot::PlotUi) -> Option<(f64, f64)> {
+        if plot_ui.auto_bounds().x {
+            return None;
+        }
+
+        let bounds = plot_ui.plot_bounds();
+        bounds
+            .is_finite_x()
+            .then(|| (bounds.min()[0], bounds.max()[0]))
+    }
+
     pub fn memory_bytes(&self) -> usize {
         self.all_samples.len() * (std::mem::size_of::<Sample>() + 8)
     }
@@ -125,6 +139,7 @@ impl PlotState {
         show_t: bool,
         show_e: bool,
         show_c: bool,
+        lod_enabled: bool,
     ) {
         let active = [
             (show_v, "voltage_plot", "Voltage", "V"),
@@ -145,8 +160,10 @@ impl PlotState {
         let rows = active_count.div_ceil(cols);
 
         let spacing = ui.spacing().item_spacing;
-        let plot_width = (spacing.x.mul_add(-((cols - 1) as f32), available.x) / cols as f32).max(100.0);
-        let plot_height = (spacing.y.mul_add(-((rows - 1) as f32), available.y) / rows as f32).max(100.0);
+        let plot_width =
+            (spacing.x.mul_add(-((cols - 1) as f32), available.x) / cols as f32).max(100.0);
+        let plot_height =
+            (spacing.y.mul_add(-((rows - 1) as f32), available.y) / rows as f32).max(100.0);
         let size = [plot_width, plot_height];
         // Max points for min-max decimation: 4 points per pixel gives good spike fidelity.
         let max_points = (plot_width * 4.0) as usize;
@@ -162,24 +179,42 @@ impl PlotState {
                         "V",
                         size,
                         |plot_ui| {
+                            let visible_x = lod_enabled
+                                .then(|| Self::visible_x_bounds(plot_ui))
+                                .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_samples(|s| f64::from(s.voltage_v), max_points))
-                                    .color(egui::Color32::from_rgb(100, 180, 255))
-                                    .width(1.5)
-                                    .name("V"),
+                                Line::new(self.points_from_samples(
+                                    |s| f64::from(s.voltage_v),
+                                    max_points,
+                                    visible_x,
+                                    lod_enabled,
+                                ))
+                                .color(egui::Color32::from_rgb(100, 180, 255))
+                                .width(1.5)
+                                .name("V"),
                             );
                             if show_d {
                                 plot_ui.line(
-                                    Line::new(self.points_from_samples(|s| f64::from(s.dp_v), max_points))
-                                        .color(egui::Color32::from_rgb(100, 255, 100))
-                                        .width(1.5)
-                                        .name("D+"),
+                                    Line::new(self.points_from_samples(
+                                        |s| f64::from(s.dp_v),
+                                        max_points,
+                                        visible_x,
+                                        lod_enabled,
+                                    ))
+                                    .color(egui::Color32::from_rgb(100, 255, 100))
+                                    .width(1.5)
+                                    .name("D+"),
                                 );
                                 plot_ui.line(
-                                    Line::new(self.points_from_samples(|s| f64::from(s.dn_v), max_points))
-                                        .color(egui::Color32::from_rgb(100, 255, 255))
-                                        .width(1.5)
-                                        .name("D−"),
+                                    Line::new(self.points_from_samples(
+                                        |s| f64::from(s.dn_v),
+                                        max_points,
+                                        visible_x,
+                                        lod_enabled,
+                                    ))
+                                    .color(egui::Color32::from_rgb(100, 255, 255))
+                                    .width(1.5)
+                                    .name("D−"),
                                 );
                             }
                         },
@@ -201,11 +236,19 @@ impl PlotState {
                         "A",
                         size,
                         |plot_ui| {
+                            let visible_x = lod_enabled
+                                .then(|| Self::visible_x_bounds(plot_ui))
+                                .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_samples(|s| f64::from(s.current_a), max_points))
-                                    .color(egui::Color32::from_rgb(255, 100, 100))
-                                    .width(1.5)
-                                    .name("A"),
+                                Line::new(self.points_from_samples(
+                                    |s| f64::from(s.current_a),
+                                    max_points,
+                                    visible_x,
+                                    lod_enabled,
+                                ))
+                                .color(egui::Color32::from_rgb(255, 100, 100))
+                                .width(1.5)
+                                .name("A"),
                             );
                         },
                         self.latest_current,
@@ -226,11 +269,19 @@ impl PlotState {
                         "W",
                         size,
                         |plot_ui| {
+                            let visible_x = lod_enabled
+                                .then(|| Self::visible_x_bounds(plot_ui))
+                                .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_samples(|s| f64::from(s.power_w), max_points))
-                                    .color(egui::Color32::from_rgb(255, 180, 80))
-                                    .width(1.5)
-                                    .name("W"),
+                                Line::new(self.points_from_samples(
+                                    |s| f64::from(s.power_w),
+                                    max_points,
+                                    visible_x,
+                                    lod_enabled,
+                                ))
+                                .color(egui::Color32::from_rgb(255, 180, 80))
+                                .width(1.5)
+                                .name("W"),
                             );
                         },
                         self.latest_power,
@@ -251,11 +302,19 @@ impl PlotState {
                         "°C",
                         size,
                         |plot_ui| {
+                            let visible_x = lod_enabled
+                                .then(|| Self::visible_x_bounds(plot_ui))
+                                .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_samples(|s| f64::from(s.temp_c), max_points))
-                                    .color(egui::Color32::from_rgb(100, 220, 100))
-                                    .width(1.5)
-                                    .name("°C"),
+                                Line::new(self.points_from_samples(
+                                    |s| f64::from(s.temp_c),
+                                    max_points,
+                                    visible_x,
+                                    lod_enabled,
+                                ))
+                                .color(egui::Color32::from_rgb(100, 220, 100))
+                                .width(1.5)
+                                .name("°C"),
                             );
                         },
                         self.latest_temp,
@@ -276,10 +335,16 @@ impl PlotState {
                         "Wh",
                         size,
                         |plot_ui| {
+                            let visible_x = lod_enabled
+                                .then(|| Self::visible_x_bounds(plot_ui))
+                                .flatten();
                             plot_ui.line(
-                                Line::new(
-                                    self.points_from_iter(self.energy_wh.iter().map(|&v| f64::from(v)), max_points),
-                                )
+                                Line::new(self.points_from_iter(
+                                    self.energy_wh.iter().map(|&v| f64::from(v)),
+                                    max_points,
+                                    visible_x,
+                                    lod_enabled,
+                                ))
                                 .color(egui::Color32::from_rgb(220, 220, 100))
                                 .width(1.5)
                                 .name("Wh"),
@@ -303,13 +368,16 @@ impl PlotState {
                         "mAh",
                         size,
                         |plot_ui| {
+                            let visible_x = lod_enabled
+                                .then(|| Self::visible_x_bounds(plot_ui))
+                                .flatten();
                             plot_ui.line(
-                                Line::new(
-                                    self.points_from_iter(
-                                        self.capacity_mah.iter().map(|&v| f64::from(v)),
-                                        max_points,
-                                    ),
-                                )
+                                Line::new(self.points_from_iter(
+                                    self.capacity_mah.iter().map(|&v| f64::from(v)),
+                                    max_points,
+                                    visible_x,
+                                    lod_enabled,
+                                ))
                                 .color(egui::Color32::from_rgb(200, 100, 220))
                                 .width(1.5)
                                 .name("mAh"),
@@ -328,21 +396,66 @@ impl PlotState {
         });
     }
 
-    /// Build plot points by extracting a value from each sample, with min-max decimation.
+    /// Compute the active index range for min-max decimation.
     ///
-    /// When the sample count exceeds `max_points`, the data is divided into `max_points/2`
-    /// buckets and each bucket emits two points (min and max Y in temporal order), preserving
-    /// all visual spikes. When below the threshold, all points are returned directly.
+    /// When `visible_x` is `Some` **and** the visible time span is less than 90 % of the total
+    /// data span, the range is narrowed to the visible sub-slice via binary search (zoom-aware
+    /// LOD). Otherwise the full buffer is used so egui_plot's auto-bounds can re-fit correctly
+    /// — restricting data while auto-bounds is active causes a feedback loop where each frame
+    /// the viewport shrinks further.
+    fn visible_range(&self, visible_x: Option<(f64, f64)>) -> (usize, usize) {
+        let count = self.all_samples.len();
+        let Some((x_min, x_max)) = visible_x else {
+            return (0, count);
+        };
+        let Some(first) = self.all_samples.front() else {
+            return (0, 0);
+        };
+        let Some(last) = self.all_samples.back() else {
+            return (0, 0);
+        };
+        let data_t_min = first.timestamp_ms as f64 / 1000.0;
+        let data_t_max = last.timestamp_ms as f64 / 1000.0;
+        let data_range = data_t_max - data_t_min;
+        let vis_range = x_max - x_min;
+
+        // Only restrict to the visible sub-slice when clearly zoomed in (< 90 % of total
+        // range). At that point egui_plot has already disabled auto-bounds due to user
+        // interaction, so restricting the data won't cause a feedback loop.
+        if data_range <= 0.0 || vis_range >= data_range * 0.9 {
+            return (0, count);
+        }
+
+        let min_ms = (x_min * 1000.0) as u64;
+        let max_ms = (x_max * 1000.0) as u64;
+        let start = self
+            .all_samples
+            .binary_search_by_key(&min_ms, |s| s.timestamp_ms)
+            .unwrap_or_else(|i| i)
+            .saturating_sub(1);
+        let end = (self
+            .all_samples
+            .binary_search_by_key(&max_ms, |s| s.timestamp_ms)
+            .unwrap_or_else(|i| i)
+            + 1)
+        .min(count);
+        (start, end)
+    }
+
+    /// Build plot points by extracting a value from each sample, with zoom-aware min-max decimation.
     fn points_from_samples(
         &self,
         extract: impl Fn(&Sample) -> f64,
         max_points: usize,
+        visible_x: Option<(f64, f64)>,
+        lod_enabled: bool,
     ) -> PlotPoints<'static> {
         let count = self.all_samples.len();
         if count == 0 {
             return PlotPoints::new(vec![]);
         }
-        if max_points == 0 || count <= max_points {
+
+        if !lod_enabled {
             let mut pts = Vec::with_capacity(count);
             for s in &self.all_samples {
                 pts.push([s.timestamp_ms as f64 / 1000.0, extract(s)]);
@@ -350,24 +463,38 @@ impl PlotState {
             return PlotPoints::new(pts);
         }
 
-        // Min-max bucket decimation.
+        let (start_idx, end_idx) = self.visible_range(visible_x);
+        let slice_len = end_idx - start_idx;
+
+        if max_points == 0 || slice_len <= max_points {
+            let mut pts = Vec::with_capacity(slice_len);
+            for i in start_idx..end_idx {
+                let s = &self.all_samples[i];
+                pts.push([s.timestamp_ms as f64 / 1000.0, extract(s)]);
+            }
+            return PlotPoints::new(pts);
+        }
+
+        // Min-max bucket decimation over the active slice.
         let buckets = (max_points / 2).max(1);
         let mut pts = Vec::with_capacity(buckets * 2);
-        let bucket_size = count as f64 / buckets as f64;
+        let bucket_size = slice_len as f64 / buckets as f64;
 
         for b in 0..buckets {
-            let start = (b as f64 * bucket_size) as usize;
-            let end = (((b + 1) as f64 * bucket_size) as usize).min(count);
-            if start >= end {
+            let local_start = (b as f64 * bucket_size) as usize;
+            let local_end = (((b + 1) as f64 * bucket_size) as usize).min(slice_len);
+            if local_start >= local_end {
                 continue;
             }
+            let abs_start = start_idx + local_start;
+            let abs_end = start_idx + local_end;
 
             let mut min_val = f64::INFINITY;
             let mut max_val = f64::NEG_INFINITY;
-            let mut min_idx = start;
-            let mut max_idx = start;
+            let mut min_idx = abs_start;
+            let mut max_idx = abs_start;
 
-            for i in start..end {
+            for i in abs_start..abs_end {
                 let s = &self.all_samples[i];
                 let v = extract(s);
                 if v.is_nan() {
@@ -385,7 +512,7 @@ impl PlotState {
 
             if min_val.is_infinite() {
                 // All NaN bucket — emit a NaN sentinel to create a gap.
-                let s = &self.all_samples[start];
+                let s = &self.all_samples[abs_start];
                 pts.push([s.timestamp_ms as f64 / 1000.0, f64::NAN]);
             } else if min_idx <= max_idx {
                 let s_min = &self.all_samples[min_idx];
@@ -405,26 +532,45 @@ impl PlotState {
         PlotPoints::new(pts)
     }
 
-    /// Build plot points from an external iterator (e.g. energy/capacity), with min-max decimation.
+    /// Build plot points from an external iterator (e.g. energy/capacity), with zoom-aware min-max decimation.
     fn points_from_iter(
         &self,
         extract: impl Iterator<Item = f64>,
         max_points: usize,
+        visible_x: Option<(f64, f64)>,
+        lod_enabled: bool,
     ) -> PlotPoints<'static> {
         let count = self.all_samples.len();
         if count == 0 {
             return PlotPoints::new(vec![]);
         }
 
-        // Collect into a temporary vec so we can apply decimation.
+        // Collect into a temporary vec so we can slice by index.
         let values: Vec<f64> = extract.take(count).collect();
         let actual = values.len();
 
-        if max_points == 0 || actual <= max_points {
+        if !lod_enabled {
             let mut pts = Vec::with_capacity(actual);
-            for (i, v) in values.into_iter().enumerate() {
+            for i in 0..actual {
                 if let Some(s) = self.all_samples.get(i) {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, v]);
+                    pts.push([s.timestamp_ms as f64 / 1000.0, values[i]]);
+                }
+            }
+            return PlotPoints::new(pts);
+        }
+
+        // Reuse the same range logic (energy_wh / capacity_mah are index-synchronized with all_samples).
+        let (start_idx, end_idx) = {
+            let (s, e) = self.visible_range(visible_x);
+            (s, e.min(actual))
+        };
+        let slice_len = end_idx - start_idx;
+
+        if max_points == 0 || slice_len <= max_points {
+            let mut pts = Vec::with_capacity(slice_len);
+            for i in start_idx..end_idx {
+                if let Some(s) = self.all_samples.get(i) {
+                    pts.push([s.timestamp_ms as f64 / 1000.0, values[i]]);
                 }
             }
             return PlotPoints::new(pts);
@@ -432,21 +578,23 @@ impl PlotState {
 
         let buckets = (max_points / 2).max(1);
         let mut pts = Vec::with_capacity(buckets * 2);
-        let bucket_size = actual as f64 / buckets as f64;
+        let bucket_size = slice_len as f64 / buckets as f64;
 
         for b in 0..buckets {
-            let start = (b as f64 * bucket_size) as usize;
-            let end = (((b + 1) as f64 * bucket_size) as usize).min(actual);
-            if start >= end {
+            let local_start = (b as f64 * bucket_size) as usize;
+            let local_end = (((b + 1) as f64 * bucket_size) as usize).min(slice_len);
+            if local_start >= local_end {
                 continue;
             }
+            let abs_start = start_idx + local_start;
+            let abs_end = start_idx + local_end;
 
             let mut min_val = f64::INFINITY;
             let mut max_val = f64::NEG_INFINITY;
-            let mut min_idx = start;
-            let mut max_idx = start;
+            let mut min_idx = abs_start;
+            let mut max_idx = abs_start;
 
-            for i in start..end {
+            for i in abs_start..abs_end {
                 let v = values[i];
                 if v.is_nan() {
                     continue;
@@ -462,7 +610,7 @@ impl PlotState {
             }
 
             if min_val.is_infinite() {
-                if let Some(s) = self.all_samples.get(start) {
+                if let Some(s) = self.all_samples.get(abs_start) {
                     pts.push([s.timestamp_ms as f64 / 1000.0, f64::NAN]);
                 }
             } else if min_idx <= max_idx {
@@ -555,7 +703,7 @@ impl PlotState {
 
         let mut hovered_point = None;
 
-        let response = Plot::new(id)
+        let response = Plot::new((id, self.generation))
             .height(size[1])
             .width(size[0])
             .include_y(0.0)
@@ -572,32 +720,34 @@ impl PlotState {
 
                 if is_hovered
                     && let Some(pointer) = plot_ui.pointer_coordinate()
-                        && let Some((x, y)) = value_at(pointer.x) {
-                            plot_ui.points(
-                                egui_plot::Points::new(vec![[x, y]])
-                                    .radius(4.0)
-                                    .color(egui::Color32::WHITE)
-                                    .shape(egui_plot::MarkerShape::Circle),
-                            );
-                            hovered_point = Some((x, y));
-                        }
+                    && let Some((x, y)) = value_at(pointer.x)
+                {
+                    plot_ui.points(
+                        egui_plot::Points::new(vec![[x, y]])
+                            .radius(4.0)
+                            .color(egui::Color32::WHITE)
+                            .shape(egui_plot::MarkerShape::Circle),
+                    );
+                    hovered_point = Some((x, y));
+                }
             });
 
         if response.response.hovered()
-            && let Some((x, y)) = hovered_point {
-                egui::show_tooltip_at_pointer(
-                    ui.ctx(),
-                    ui.layer_id(),
-                    egui::Id::new(id).with("tooltip"),
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{label}: {y:.3} {unit}\ntime: {x:.3} s"))
-                                .size(14.0)
-                                .strong(),
-                        );
-                    },
-                );
-            }
+            && let Some((x, y)) = hovered_point
+        {
+            egui::show_tooltip_at_pointer(
+                ui.ctx(),
+                ui.layer_id(),
+                egui::Id::new(id).with("tooltip"),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{label}: {y:.3} {unit}\ntime: {x:.3} s"))
+                            .size(14.0)
+                            .strong(),
+                    );
+                },
+            );
+        }
 
         // Overlay title with live value
         let title_rect = response.response.rect;
