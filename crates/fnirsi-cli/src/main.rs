@@ -481,7 +481,6 @@ fn cmd_log_usb(
     let rate_step: f64 = rate.map_or(1.0, |r| r / native_rate).clamp(0.0, 1.0);
     let mut samples_written: u64 = 0;
 
-    std::thread::sleep(Duration::from_millis(100));
     let start_time = std::time::Instant::now();
 
     loop {

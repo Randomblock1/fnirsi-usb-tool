@@ -1,6 +1,6 @@
 # fnirsi-usb-tool
 
-An open-source Rust toolkit for [FNIRSI](https://www.fnirsi.cn/) USB power meters. Provides both a CLI and a native GUI for live data logging, offline recording conversion, and firmware updates — no proprietary Windows software required.
+An open-source Rust toolkit for [FNIRSI](https://www.fnirsi.cn/) USB power meters. Provides both a CLI and GUI for live data logging, offline recording conversion, and firmware updates.
 
 ## Supported Devices
 
@@ -12,12 +12,12 @@ An open-source Rust toolkit for [FNIRSI](https://www.fnirsi.cn/) USB power meter
 | C1     | `0483:003B` | USB HID |
 | FNAC28 | `0483:003B` | USB HID |
 
-> **Note:** Only FNB58 support is actively tested. Other devices should work but are unverified.
+> **Note:** Only FNB58 support has been tested. Other devices should work but are unverified.
 
 ## Features
 
-- **Live measurement streaming** — voltage, current, power, D+/D−, temperature at ~100 Hz (USB) or ~10 Hz (BLE)
-- **Multiple export formats** — CSV, JSON Lines (`.jsonl`), Excel (`.xlsx`), and optional Parquet (`.parquet`)
+- **Live measurement streaming** — voltage, current, power, D+/D−, temperature at 100 Hz (USB) or 10 Hz (BLE)
+- **Multiple export formats** — CSV, JSON Lines (`.jsonl`), Excel (`.xlsx`), and optionally Parquet (`.parquet`)
 - **Native GUI** — real-time plots, configurable sample rate decimation, import/export, and energy accumulators (eframe/egui)
 - **Offline recording conversion** — convert FNIRSI `.cfn`, CSV, JSONL, XLSX, and optional Parquet files between supported formats
 - **DFU firmware updates** — flash `.ufn` firmware files over USB
@@ -56,11 +56,10 @@ cargo build --release -p fnirsi-gui
 
 ### Linux Dependencies
 
-The GUI requires system libraries for the graphics backend. On Debian/Ubuntu:
+The eframe GUI requires system libraries for the graphics backend. On Debian/Ubuntu:
 
 ```bash
-sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-    libxkbcommon-dev libssl-dev libgtk-3-dev libudev-dev
+sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
 ```
 
 ## Setup
@@ -71,8 +70,7 @@ USB HID devices require root privileges by default. Install the bundled udev rul
 
 ```bash
 sudo cp udev/99-fnirsi.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-sudo udevadm trigger
+sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
 ## Usage
@@ -95,7 +93,7 @@ fnirsi-cli log --json
 # Save as JSON Lines to a file
 fnirsi-cli log --output data.jsonl
 
-# Save as Parquet (requires `--features parquet`)
+# Save as Parquet (requires `parquet` feature)
 fnirsi-cli log --output data.parquet
 
 # Stop after 1000 samples
@@ -127,17 +125,6 @@ fnirsi-cli flash Fnb58V1.11.ufn
 ```bash
 fnirsi-gui
 ```
-
-The GUI provides:
-
-- USB and Bluetooth LE connectivity
-- Real-time voltage, current, power, D+/D−, and temperature plots
-- Adjustable sample rate (1–100 Hz) and configurable buffer size
-- Live readouts of V, A, W, D+, D−, and temperature
-- Energy (Wh) and capacity (mAh) accumulators and plots
-- Timed recordings with auto-pause
-- Import `.cfn`, `.csv`, `.jsonl`, `.xlsx`, and optional `.parquet` files for offline viewing
-- Export captured data to CSV, JSON Lines, Excel, and optional Parquet
 
 ## Logging
 

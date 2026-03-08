@@ -165,8 +165,9 @@ impl PlotState {
         let plot_height =
             (spacing.y.mul_add(-((rows - 1) as f32), available.y) / rows as f32).max(100.0);
         let size = [plot_width, plot_height];
-        // Max points for min-max decimation: 4 points per pixel gives good spike fidelity.
-        let max_points = (plot_width * 4.0) as usize;
+        // Max points for min-max decimation (bigger = more detail, slower)
+        const POINTS_PER_PIXEL: f32 = 8.0;
+        let max_points = (plot_width * POINTS_PER_PIXEL) as usize;
 
         ui.vertical(|ui| {
             let mut current_col = 0;

@@ -185,7 +185,6 @@ pub async fn connect_and_stream(
     peripheral
         .write(&write_char, &BLE_CMD_INIT, WriteType::WithoutResponse)
         .await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
     peripheral
         .write(&write_char, &BLE_CMD_START, WriteType::WithoutResponse)
         .await?;

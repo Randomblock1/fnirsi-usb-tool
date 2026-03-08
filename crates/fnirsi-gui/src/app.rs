@@ -160,7 +160,7 @@ impl FnirsiApp {
             energy_ws: 0.0,
             capacity_as: 0.0,
             status: "Disconnected".to_string(),
-            validate_crc: false,
+            validate_crc: true,
             buffer_preset_idx: 3, // 10 MB default
             rate_preset_idx: 0,   // 100 Hz default
             sample_counter: 0,
@@ -974,7 +974,6 @@ fn reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()>, v
         return;
     }
 
-    std::thread::sleep(Duration::from_millis(100));
     let mut sample_index: u64 = 0;
 
     loop {

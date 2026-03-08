@@ -148,7 +148,8 @@ impl UsbDevice {
         let commands = protocol::init_commands(self.is_fnb58_variant);
         for cmd in &commands {
             self.write_report(cmd)?;
-            std::thread::sleep(Duration::from_millis(50));
+            // If this delay isn't here, the device will crash
+            std::thread::sleep(Duration::from_millis(25));
         }
         self.last_keepalive = Instant::now();
         info!("Streaming started");
