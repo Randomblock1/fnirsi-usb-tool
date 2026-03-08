@@ -576,7 +576,7 @@ fn cmd_log_ble(
             target.address.yellow()
         );
 
-        let mut rx = ble::connect_and_stream(&target.address, Duration::from_secs(3))
+        let (mut rx, handle) = ble::connect_and_stream(&target.address, Duration::from_secs(3))
             .await
             .context("BLE connection failed")?;
 
@@ -638,6 +638,9 @@ fn cmd_log_ble(
                 Err(_) => {}
             }
         }
+
+        drop(rx);
+        let _ = handle.await;
 
         out.flush()?;
 

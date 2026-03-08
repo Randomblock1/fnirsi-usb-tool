@@ -131,7 +131,7 @@ pub async fn scan_devices(scan_duration: Duration) -> Result<Vec<BleDeviceInfo>,
 pub async fn connect_and_stream(
     address: &str,
     scan_duration: Duration,
-) -> Result<mpsc::Receiver<Sample>, BleError> {
+) -> Result<(mpsc::Receiver<Sample>, tokio::task::JoinHandle<()>), BleError> {
     use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
     use btleplug::platform::Manager;
     use futures_util::StreamExt;
@@ -195,21 +195,35 @@ pub async fn connect_and_stream(
     let (tx, rx) = mpsc::channel::<Sample>(256);
     let mut notification_stream = peripheral.notifications().await?;
 
-    tokio::spawn(async move {
-        while let Some(notification) = notification_stream.next().await {
-            if let Some(sample) = decode_ble_aa07(&notification.value)
-                && tx.send(sample).await.is_err()
-            {
-                break;
+    let handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                opt = notification_stream.next() => {
+                    match opt {
+                        Some(notification) => {
+                            if let Some(sample) = decode_ble_aa07(&notification.value) {
+                                if tx.send(sample).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = tx.closed() => {
+                    break;
+                }
             }
         }
         warn!("BLE notification stream ended");
-        // Move peripheral into the closure so the BLE connection stays
-        // alive for the lifetime of the task.
-        drop(peripheral);
+        if let Err(e) = peripheral.disconnect().await {
+            warn!("Error disconnecting BLE: {e}");
+        } else {
+            info!("Disconnected from BLE device");
+        }
     });
 
-    Ok(rx)
+    Ok((rx, handle))
 }
 
 #[cfg(test)]

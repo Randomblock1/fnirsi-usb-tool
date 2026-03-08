@@ -146,6 +146,10 @@ pub struct FnirsiApp {
     imported_file_stem: Option<String>,
     /// Last native window title applied to avoid redundant viewport commands.
     last_window_title: String,
+    /// Handle to the background reader thread.
+    reader_thread_handle: Option<std::thread::JoinHandle<()>>,
+    /// Indicates whether the GUI is shutting down and waiting for background tasks.
+    shutting_down: bool,
 }
 
 impl FnirsiApp {
@@ -186,6 +190,8 @@ impl FnirsiApp {
             imported_file_name: None,
             imported_file_stem: None,
             last_window_title: APP_TITLE.to_string(),
+            reader_thread_handle: None,
+            shutting_down: false,
         }
     }
 
@@ -243,10 +249,11 @@ impl FnirsiApp {
         self.rx = Some(rx);
         self.stop_tx = Some(stop_tx);
 
-        std::thread::spawn(move || match mode {
+        let handle = std::thread::spawn(move || match mode {
             ConnectionMode::Usb => reader_thread(tx, stop_rx, validate_crc),
             ConnectionMode::Bluetooth => ble_reader_thread(tx, stop_rx),
         });
+        self.reader_thread_handle = Some(handle);
 
         self.status = "Connecting...".to_string();
     }
@@ -506,7 +513,54 @@ impl FnirsiApp {
 }
 
 impl eframe::App for FnirsiApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.disconnect();
+        if let Some(handle) = self.reader_thread_handle.take() {
+            let _ = handle.join();
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self
+                .reader_thread_handle
+                .as_ref()
+                .map_or(false, |h| !h.is_finished())
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if !self.shutting_down {
+                    self.shutting_down = true;
+                    // Trigger disconnect to gracefully terminate the stream but don't block
+                    if let Some(stop) = self.stop_tx.take() {
+                        let _ = stop.send(());
+                    }
+                    self.rx = None;
+                    self.connected = false;
+                    self.device_info = None;
+                }
+            }
+        }
+
+        if self.shutting_down {
+            if self
+                .reader_thread_handle
+                .as_ref()
+                .map_or(true, |h| h.is_finished())
+            {
+                self.reader_thread_handle.take();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new("Disconnecting...").heading());
+                });
+            });
+            ctx.request_repaint();
+            return;
+        }
+
         self.process_messages();
         self.sync_window_title(ctx);
 
@@ -1056,13 +1110,14 @@ fn ble_reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()
             path: None,
         }));
 
-        let mut rx = match ble::connect_and_stream(&device.address, Duration::from_secs(2)).await {
-            Ok(rx) => rx,
-            Err(e) => {
-                let _ = tx.send(DeviceMessage::Error(format!("BLE Connect Error: {e}")));
-                return;
-            }
-        };
+        let (mut rx, handle) =
+            match ble::connect_and_stream(&device.address, Duration::from_secs(2)).await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    let _ = tx.send(DeviceMessage::Error(format!("BLE Connect Error: {e}")));
+                    return;
+                }
+            };
 
         let start_time = Instant::now();
         loop {
@@ -1082,6 +1137,9 @@ fn ble_reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()
                 Err(_) => {}
             }
         }
+
+        drop(rx);
+        let _ = handle.await;
 
         let _ = tx.send(DeviceMessage::Disconnected);
     });
