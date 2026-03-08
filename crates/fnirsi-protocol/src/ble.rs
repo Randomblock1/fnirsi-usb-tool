@@ -128,10 +128,14 @@ pub async fn scan_devices(scan_duration: Duration) -> Result<Vec<BleDeviceInfo>,
 /// Connect to an FNIRSI device over BLE and start receiving samples.
 ///
 /// Returns a channel receiver that yields `Sample` values as they arrive.
-pub async fn connect_and_stream(
+pub async fn connect_and_stream<F>(
     address: &str,
     scan_duration: Duration,
-) -> Result<(mpsc::Receiver<Sample>, tokio::task::JoinHandle<()>), BleError> {
+    mut on_status: F,
+) -> Result<(mpsc::Receiver<Sample>, tokio::task::JoinHandle<()>), BleError>
+where
+    F: FnMut(String) + Send + 'static,
+{
     use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
     use btleplug::platform::Manager;
     use futures_util::StreamExt;
@@ -144,6 +148,7 @@ pub async fn connect_and_stream(
         .ok_or(BleError::DeviceNotFound)?;
 
     // Scan for the target device by BLE address.
+    on_status(format!("Scanning for {address}..."));
     adapter.start_scan(ScanFilter::default()).await?;
     tokio::time::sleep(scan_duration).await;
     adapter.stop_scan().await?;
@@ -162,7 +167,9 @@ pub async fn connect_and_stream(
     let peripheral = target_peripheral.ok_or(BleError::DeviceNotFound)?;
 
     info!("Connecting to BLE device at {address}...");
+    on_status("Connecting...".to_string());
     peripheral.connect().await?;
+    on_status("Discovering services...".to_string());
     peripheral.discover_services().await?;
 
     // Locate the GATT write and notify characteristics.
@@ -179,9 +186,11 @@ pub async fn connect_and_stream(
         .ok_or_else(|| BleError::CharacteristicNotFound("notify (FFE4)".to_string()))?;
 
     // Subscribe to notifications
+    on_status("Subscribing to notifications...".to_string());
     peripheral.subscribe(&notify_char).await?;
 
     // Send init commands
+    on_status("Initializing device...".to_string());
     peripheral
         .write(&write_char, &BLE_CMD_INIT, WriteType::WithoutResponse)
         .await?;
@@ -215,7 +224,7 @@ pub async fn connect_and_stream(
                 }
             }
         }
-        warn!("BLE notification stream ended");
+        info!("BLE notification stream ended");
         if let Err(e) = peripheral.disconnect().await {
             warn!("Error disconnecting BLE: {e}");
         } else {

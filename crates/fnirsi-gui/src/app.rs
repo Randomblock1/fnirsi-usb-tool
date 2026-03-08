@@ -1100,6 +1100,20 @@ fn ble_reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()
             "Connecting to {device_name}..."
         )));
 
+        let tx_clone = tx.clone();
+        let (mut rx, handle) =
+            match ble::connect_and_stream(&device.address, Duration::from_secs(2), move |msg| {
+                let _ = tx_clone.send(DeviceMessage::Status(msg));
+            })
+            .await
+            {
+                Ok(rx) => rx,
+                Err(e) => {
+                    let _ = tx.send(DeviceMessage::Error(format!("BLE Connect Error: {e}")));
+                    return;
+                }
+            };
+
         let _ = tx.send(DeviceMessage::Connected(DeviceInfo {
             device_type: DeviceType::Fnb58, // Treat all BLE devices generically
             vid: 0,
@@ -1109,15 +1123,6 @@ fn ble_reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()
             serial: None,
             path: None,
         }));
-
-        let (mut rx, handle) =
-            match ble::connect_and_stream(&device.address, Duration::from_secs(2)).await {
-                Ok(rx) => rx,
-                Err(e) => {
-                    let _ = tx.send(DeviceMessage::Error(format!("BLE Connect Error: {e}")));
-                    return;
-                }
-            };
 
         let start_time = Instant::now();
         loop {
