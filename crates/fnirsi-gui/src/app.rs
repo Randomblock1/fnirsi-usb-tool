@@ -1,4 +1,4 @@
-use crate::plots::PlotState;
+use crate::plots::{PlotConfig, PlotState};
 use eframe::egui;
 use fnirsi_protocol::{
     DeviceType, ble, cfn, csv_utils, device::DeviceInfo, sample::Sample, usb::UsbDevice,
@@ -123,13 +123,7 @@ pub struct FnirsiApp {
     rate_preset_idx: usize,
     /// Native sample counter (used for downsampling).
     sample_counter: usize,
-    show_voltage: bool,
-    show_d_lines: bool,
-    show_current: bool,
-    show_power: bool,
-    show_temperature: bool,
-    show_energy: bool,
-    show_capacity: bool,
+    plot_config: PlotConfig,
     lod_enabled: bool,
     circular_buffer: bool,
     paused: bool,
@@ -170,15 +164,17 @@ impl FnirsiApp {
             buffer_preset_idx: 3, // 10 MB default
             rate_preset_idx: 0,   // 100 Hz default
             sample_counter: 0,
-            show_voltage: true,
-            show_d_lines: false,
-            show_current: true,
-            show_power: true,
-            show_temperature: true,
-            show_energy: false,
-            show_capacity: false,
+            plot_config: PlotConfig {
+                voltage: true,
+                d_lines: false,
+                current: true,
+                power: true,
+                temperature: true,
+                energy: false,
+                capacity: false,
+            },
             lod_enabled: true,
-            circular_buffer: true,
+            circular_buffer: false,
             paused: false,
             connection_mode: ConnectionMode::Usb,
             show_export_dialog: false,
@@ -194,10 +190,10 @@ impl FnirsiApp {
     }
 
     fn window_title(&self) -> String {
-        match &self.imported_file_name {
-            Some(name) => format!("{APP_TITLE} - {name}"),
-            None => APP_TITLE.to_string(),
-        }
+        self.imported_file_name.as_ref().map_or_else(
+            || APP_TITLE.to_string(),
+            |name| format!("{APP_TITLE} - {name}"),
+        )
     }
 
     fn sync_window_title(&mut self, ctx: &egui::Context) {
@@ -361,19 +357,25 @@ impl FnirsiApp {
                         let c_mah = self.capacity_as / 3.6;
                         self.plots.push(&s, e_wh, c_mah);
 
-                        let mut dt = default_dt;
-                        let mut avg_power = f64::from(s.power_w);
-                        let mut avg_current = f64::from(s.current_a);
-
-                        if let Some(prev) = prev_sample {
-                            let dt_ms = s.timestamp_ms.saturating_sub(prev.timestamp_ms);
-                            if dt_ms > 0 {
-                                dt = dt_ms as f64 / 1000.0;
-                            }
-                            avg_power = (f64::from(s.power_w) + f64::from(prev.power_w)) / 2.0;
-                            avg_current =
-                                (f64::from(s.current_a) + f64::from(prev.current_a)) / 2.0;
-                        }
+                        let (dt, avg_power, avg_current) = prev_sample.map_or_else(
+                            || (default_dt, f64::from(s.power_w), f64::from(s.current_a)),
+                            |prev| {
+                                let dt_ms = s.timestamp_ms.saturating_sub(prev.timestamp_ms);
+                                let dt = if dt_ms > 0 {
+                                    dt_ms as f64 / 1000.0
+                                } else {
+                                    default_dt
+                                };
+                                (
+                                    dt,
+                                    f64::midpoint(f64::from(s.power_w), f64::from(prev.power_w)),
+                                    f64::midpoint(
+                                        f64::from(s.current_a),
+                                        f64::from(prev.current_a),
+                                    ),
+                                )
+                            },
+                        );
 
                         self.energy_ws += avg_power * dt;
                         self.capacity_as += avg_current * dt;
@@ -439,18 +441,23 @@ impl FnirsiApp {
                             }
 
                             if !self.paused {
-                                let mut dt = 0.0;
-                                let mut avg_power = f64::from(s.power_w);
-                                let mut avg_current = f64::from(s.current_a);
-
-                                if let Some(prev) = self.latest {
-                                    dt = s.timestamp_ms.saturating_sub(prev.timestamp_ms) as f64
-                                        / 1000.0;
-                                    avg_power =
-                                        (f64::from(s.power_w) + f64::from(prev.power_w)) / 2.0;
-                                    avg_current =
-                                        (f64::from(s.current_a) + f64::from(prev.current_a)) / 2.0;
-                                }
+                                let (dt, avg_power, avg_current) = self.latest.map_or_else(
+                                    || (0.0, f64::from(s.power_w), f64::from(s.current_a)),
+                                    |prev| {
+                                        (
+                                            s.timestamp_ms.saturating_sub(prev.timestamp_ms) as f64
+                                                / 1000.0,
+                                            f64::midpoint(
+                                                f64::from(s.power_w),
+                                                f64::from(prev.power_w),
+                                            ),
+                                            f64::midpoint(
+                                                f64::from(s.current_a),
+                                                f64::from(prev.current_a),
+                                            ),
+                                        )
+                                    },
+                                );
 
                                 if dt > 0.0 {
                                     self.energy_ws += avg_power * dt;
@@ -708,22 +715,22 @@ impl eframe::App for FnirsiApp {
                         ui.checkbox(b, label).on_hover_text(tooltip);
                     };
 
-                    toggle(&mut self.show_voltage, "Voltage (V)", "Show Voltage Plot");
+                    toggle(&mut self.plot_config.voltage, "Voltage (V)", "Show Voltage Plot");
                     toggle(
-                        &mut self.show_d_lines,
+                        &mut self.plot_config.d_lines,
                         "D+/D− Lines",
                         "Show D+/D− Data Lines on Voltage Plot",
                     );
-                    toggle(&mut self.show_current, "Current (A)", "Show Current Plot");
-                    toggle(&mut self.show_power, "Power (W)", "Show Power Plot");
+                    toggle(&mut self.plot_config.current, "Current (A)", "Show Current Plot");
+                    toggle(&mut self.plot_config.power, "Power (W)", "Show Power Plot");
                     toggle(
-                        &mut self.show_temperature,
+                        &mut self.plot_config.temperature,
                         "Temperature (°C)",
                         "Show Temperature Plot",
                     );
-                    toggle(&mut self.show_energy, "Energy (Wh)", "Show Energy Plot");
+                    toggle(&mut self.plot_config.energy, "Energy (Wh)", "Show Energy Plot");
                     toggle(
-                        &mut self.show_capacity,
+                        &mut self.plot_config.capacity,
                         "Capacity (mAh)",
                         "Show Capacity Plot",
                     );
@@ -929,20 +936,13 @@ impl eframe::App for FnirsiApp {
 
         // Central panel: plots
         egui::CentralPanel::default().show(ctx, |ui| {
-            let show_d = self.show_d_lines && self.connection_mode == ConnectionMode::Usb;
-            let show_t = self.show_temperature && self.connection_mode == ConnectionMode::Usb;
+            let mut cfg = self.plot_config;
+            if self.connection_mode != ConnectionMode::Usb {
+                cfg.d_lines = false;
+                cfg.temperature = false;
+            }
 
-            self.plots.show(
-                ui,
-                self.show_voltage,
-                show_d,
-                self.show_current,
-                self.show_power,
-                show_t,
-                self.show_energy,
-                self.show_capacity,
-                self.lod_enabled,
-            );
+            self.plots.show(ui, cfg, self.lod_enabled);
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.label(
@@ -957,6 +957,7 @@ impl eframe::App for FnirsiApp {
 }
 
 /// Background thread that connects to the device and streams samples.
+#[allow(clippy::needless_pass_by_value)]
 fn reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()>, validate_crc: bool) {
     let mut device = match UsbDevice::connect_first() {
         Ok(d) => d,
@@ -1008,6 +1009,7 @@ fn reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()>, v
 }
 
 /// Background thread that connects to the device and streams samples over BLE.
+#[allow(clippy::needless_pass_by_value)]
 fn ble_reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()>) {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,

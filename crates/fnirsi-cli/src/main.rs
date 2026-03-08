@@ -1,8 +1,4 @@
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::needless_pass_by_value
-)]
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -128,13 +124,26 @@ fn main() -> Result<()> {
             max_samples,
         } => {
             if ble {
-                cmd_log_ble(output, json, duration, rate, max_samples)
+                cmd_log_ble(
+                    output.as_deref(),
+                    json,
+                    duration.as_deref(),
+                    rate,
+                    max_samples,
+                )
             } else {
-                cmd_log_usb(output, json, duration, crc, rate, max_samples)
+                cmd_log_usb(
+                    output.as_deref(),
+                    json,
+                    duration.as_deref(),
+                    crc,
+                    rate,
+                    max_samples,
+                )
             }
         }
-        Commands::Flash { firmware } => cmd_flash(firmware),
-        Commands::Convert { input, output } => cmd_convert(input, output),
+        Commands::Flash { firmware } => cmd_flash(&firmware),
+        Commands::Convert { input, output } => cmd_convert(&input, &output),
     }
 }
 
@@ -263,7 +272,7 @@ impl OutputFormat {
     }
 }
 
-fn supported_output_extensions() -> &'static str {
+const fn supported_output_extensions() -> &'static str {
     if cfg!(feature = "parquet") {
         ".csv, .jsonl, .xlsx, or .parquet"
     } else {
@@ -284,8 +293,12 @@ struct LogOutput {
 
 impl LogOutput {
     /// Create a new output writer for the given path / stdout mode.
-    fn new(output: Option<PathBuf>, json_stdout: bool, include_usb_fields: bool) -> Result<Self> {
-        let (fmt, csv_writer, jsonl_writer, buffered_output_path) = if let Some(ref path) = output {
+    fn new(
+        output: Option<&std::path::Path>,
+        json_stdout: bool,
+        include_usb_fields: bool,
+    ) -> Result<Self> {
+        let (fmt, csv_writer, jsonl_writer, buffered_output_path) = if let Some(path) = output {
             let fmt = OutputFormat::from_path(path)?;
             match fmt {
                 OutputFormat::Csv => {
@@ -296,9 +309,9 @@ impl LogOutput {
                     let f = std::fs::File::create(path).context("Failed to create JSONL file")?;
                     (fmt, None, Some(std::io::BufWriter::new(f)), None)
                 }
-                OutputFormat::Xlsx => (fmt, None, None, Some(path.clone())),
+                OutputFormat::Xlsx => (fmt, None, None, Some(path.to_path_buf())),
                 #[cfg(feature = "parquet")]
-                OutputFormat::Parquet => (fmt, None, None, Some(path.clone())),
+                OutputFormat::Parquet => (fmt, None, None, Some(path.to_path_buf())),
                 _ => unreachable!(),
             }
         } else {
@@ -422,9 +435,9 @@ impl LogOutput {
 
 /// Stream live measurement data from a USB-connected device.
 fn cmd_log_usb(
-    output: Option<PathBuf>,
+    output: Option<&std::path::Path>,
     json: bool,
-    duration: Option<String>,
+    duration: Option<&str>,
     validate_crc: bool,
     rate: Option<f64>,
     max_samples: Option<u64>,
@@ -453,8 +466,7 @@ fn cmd_log_usb(
     }
 
     let deadline = duration
-        .as_ref()
-        .map(|d| parse_duration(d))
+        .map(parse_duration)
         .transpose()?
         .map(|d| std::time::Instant::now() + d);
 
@@ -531,9 +543,9 @@ fn cmd_log_usb(
 
 /// Stream live measurement data from a BLE-connected device.
 fn cmd_log_ble(
-    output: Option<PathBuf>,
+    output: Option<&std::path::Path>,
     json: bool,
-    duration: Option<String>,
+    duration: Option<&str>,
     rate: Option<f64>,
     max_samples: Option<u64>,
 ) -> Result<()> {
@@ -577,8 +589,7 @@ fn cmd_log_ble(
         }
 
         let deadline = duration
-            .as_ref()
-            .map(|d| parse_duration(d))
+            .map(parse_duration)
             .transpose()?
             .map(|d| std::time::Instant::now() + d);
 
@@ -643,10 +654,10 @@ fn cmd_log_ble(
 }
 
 /// Flash a `.ufn` firmware file to a device in DFU mode.
-fn cmd_flash(firmware_path: PathBuf) -> Result<()> {
-    let firmware = dfu::read_firmware_file(&firmware_path).context("Failed to read firmware")?;
+fn cmd_flash(firmware_path: &std::path::Path) -> Result<()> {
+    let firmware = dfu::read_firmware_file(firmware_path).context("Failed to read firmware")?;
 
-    let version = parse_firmware_version(&firmware_path).unwrap_or(0);
+    let version = parse_firmware_version(firmware_path).unwrap_or(0);
 
     eprintln!(
         "{} Loaded firmware: {} ({} bytes, version {})",
@@ -764,7 +775,7 @@ fn write_samples_to_path(path: &std::path::Path, samples: &[Sample]) -> Result<(
 }
 
 /// Convert a supported recording file to another structured format.
-fn cmd_convert(input: PathBuf, output: PathBuf) -> Result<()> {
+fn cmd_convert(input: &std::path::Path, output: &std::path::Path) -> Result<()> {
     println!(
         "{} {}",
         "FNIRSI Format Converter".bold(),
@@ -773,7 +784,7 @@ fn cmd_convert(input: PathBuf, output: PathBuf) -> Result<()> {
 
     println!("{} Reading input file: {}", "➤".blue(), input.display());
 
-    let samples = read_samples_from_path(&input)?;
+    let samples = read_samples_from_path(input)?;
     println!("  {} Loaded {} samples", "✓".green(), samples.len());
 
     let out_ext = output
@@ -789,7 +800,7 @@ fn cmd_convert(input: PathBuf, output: PathBuf) -> Result<()> {
         output.display()
     );
 
-    write_samples_to_path(&output, &samples)?;
+    write_samples_to_path(output, &samples)?;
 
     println!("  {} Success!", "✓".green());
     Ok(())

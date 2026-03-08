@@ -82,6 +82,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn test_validate_data_packet() {
         // Build a packet with correct CRC
         let mut packet = [0u8; 64];

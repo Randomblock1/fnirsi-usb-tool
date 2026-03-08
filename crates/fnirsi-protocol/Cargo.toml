@@ -5,7 +5,7 @@ edition = "2024"
 description = "FNIRSI USB power meter protocol library"
 
 [features]
-default = ["parquet"]
+default = []
 parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
 
 [dependencies]

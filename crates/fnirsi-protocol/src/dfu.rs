@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn test_make_dfu_packet_structure() {
         let payload = [0x42u8; 6];
-        let pkt = make_dfu_packet(0x28, 0x00000006, &payload);
+        let pkt = make_dfu_packet(0x28, 0x0000_0006, &payload);
 
         assert_eq!(pkt[0], 0x28); // endpoint
         assert_eq!(pkt[1], 0x06); // param low byte
@@ -182,6 +182,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn test_make_dfu_packet_zeros() {
         let pkt = make_dfu_packet(0x00, 0, &[]);
         // All zeros except CRC
@@ -191,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn test_max_payload_size() {
         // Payload larger than MAX_DFU_PAYLOAD should be truncated
         let payload = [0xAA; 100];

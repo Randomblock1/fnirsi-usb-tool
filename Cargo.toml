@@ -5,3 +5,10 @@ members = ["crates/fnirsi-protocol", "crates/fnirsi-cli", "crates/fnirsi-gui"]
 [workspace.lints.clippy]
 pedantic = "warn"
 nursery = "warn"
+
+[profile.release]
+opt-level = 3
+strip = "none"
+lto = true
+codegen-units = 1
+panic = "abort"

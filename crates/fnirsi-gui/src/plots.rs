@@ -5,6 +5,17 @@ use egui_plot::{Line, Plot, PlotPoints};
 use fnirsi_protocol::Sample;
 use std::collections::VecDeque;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PlotConfig {
+    pub voltage: bool,
+    pub d_lines: bool,
+    pub current: bool,
+    pub power: bool,
+    pub temperature: bool,
+    pub energy: bool,
+    pub capacity: bool,
+}
+
 /// Circular-buffered storage for the real-time measurement plots.
 pub struct PlotState {
     all_samples: VecDeque<Sample>,
@@ -129,25 +140,14 @@ impl PlotState {
     }
 
     /// Draw all enabled plots in a responsive grid layout.
-    pub fn show(
-        &self,
-        ui: &mut egui::Ui,
-        show_v: bool,
-        show_d: bool,
-        show_i: bool,
-        show_p: bool,
-        show_t: bool,
-        show_e: bool,
-        show_c: bool,
-        lod_enabled: bool,
-    ) {
+    pub fn show(&self, ui: &mut egui::Ui, config: PlotConfig, lod_enabled: bool) {
         let active = [
-            (show_v, "voltage_plot", "Voltage", "V"),
-            (show_i, "current_plot", "Current", "A"),
-            (show_p, "power_plot", "Power", "W"),
-            (show_t, "temperature_plot", "Temperature", "°C"),
-            (show_e, "energy_plot", "Energy", "Wh"),
-            (show_c, "capacity_plot", "Capacity", "mAh"),
+            (config.voltage, "voltage_plot", "Voltage", "V"),
+            (config.current, "current_plot", "Current", "A"),
+            (config.power, "power_plot", "Power", "W"),
+            (config.temperature, "temperature_plot", "Temperature", "°C"),
+            (config.energy, "energy_plot", "Energy", "Wh"),
+            (config.capacity, "capacity_plot", "Capacity", "mAh"),
         ];
 
         let active_count = active.iter().filter(|x| x.0).count();
@@ -171,7 +171,7 @@ impl PlotState {
         ui.vertical(|ui| {
             let mut current_col = 0;
             ui.horizontal_wrapped(|ui| {
-                if show_v {
+                if config.voltage {
                     self.show_plot(
                         ui,
                         "voltage_plot",
@@ -193,7 +193,7 @@ impl PlotState {
                                 .width(1.5)
                                 .name("V"),
                             );
-                            if show_d {
+                            if config.d_lines {
                                 plot_ui.line(
                                     Line::new(self.points_from_samples(
                                         |s| f64::from(s.dp_v),
@@ -228,7 +228,7 @@ impl PlotState {
                     }
                 }
 
-                if show_i {
+                if config.current {
                     self.show_plot(
                         ui,
                         "current_plot",
@@ -261,7 +261,7 @@ impl PlotState {
                     }
                 }
 
-                if show_p {
+                if config.power {
                     self.show_plot(
                         ui,
                         "power_plot",
@@ -294,7 +294,7 @@ impl PlotState {
                     }
                 }
 
-                if show_t {
+                if config.temperature {
                     self.show_plot(
                         ui,
                         "temperature_plot",
@@ -327,7 +327,7 @@ impl PlotState {
                     }
                 }
 
-                if show_e {
+                if config.energy {
                     self.show_plot(
                         ui,
                         "energy_plot",
@@ -360,7 +360,7 @@ impl PlotState {
                     }
                 }
 
-                if show_c {
+                if config.capacity {
                     self.show_plot(
                         ui,
                         "capacity_plot",
@@ -400,7 +400,7 @@ impl PlotState {
     ///
     /// When `visible_x` is `Some` **and** the visible time span is less than 90 % of the total
     /// data span, the range is narrowed to the visible sub-slice via binary search (zoom-aware
-    /// LOD). Otherwise the full buffer is used so egui_plot's auto-bounds can re-fit correctly
+    /// LOD). Otherwise the full buffer is used so `egui_plot`'s auto-bounds can re-fit correctly
     /// — restricting data while auto-bounds is active causes a feedback loop where each frame
     /// the viewport shrinks further.
     fn visible_range(&self, visible_x: Option<(f64, f64)>) -> (usize, usize) {
@@ -551,9 +551,9 @@ impl PlotState {
 
         if !lod_enabled {
             let mut pts = Vec::with_capacity(actual);
-            for i in 0..actual {
+            for (i, v) in values.iter().enumerate().take(actual) {
                 if let Some(s) = self.all_samples.get(i) {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, values[i]]);
+                    pts.push([s.timestamp_ms as f64 / 1000.0, *v]);
                 }
             }
             return PlotPoints::new(pts);
@@ -568,9 +568,9 @@ impl PlotState {
 
         if max_points == 0 || slice_len <= max_points {
             let mut pts = Vec::with_capacity(slice_len);
-            for i in start_idx..end_idx {
+            for (i, v) in values.iter().enumerate().take(end_idx).skip(start_idx) {
                 if let Some(s) = self.all_samples.get(i) {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, values[i]]);
+                    pts.push([s.timestamp_ms as f64 / 1000.0, *v]);
                 }
             }
             return PlotPoints::new(pts);
@@ -594,8 +594,8 @@ impl PlotState {
             let mut min_idx = abs_start;
             let mut max_idx = abs_start;
 
-            for i in abs_start..abs_end {
-                let v = values[i];
+            for (i, v) in values.iter().enumerate().take(abs_end).skip(abs_start) {
+                let v = *v;
                 if v.is_nan() {
                     continue;
                 }
@@ -617,10 +617,10 @@ impl PlotState {
                 if let Some(s) = self.all_samples.get(min_idx) {
                     pts.push([s.timestamp_ms as f64 / 1000.0, min_val]);
                 }
-                if min_idx != max_idx {
-                    if let Some(s) = self.all_samples.get(max_idx) {
-                        pts.push([s.timestamp_ms as f64 / 1000.0, max_val]);
-                    }
+                if min_idx != max_idx
+                    && let Some(s) = self.all_samples.get(max_idx)
+                {
+                    pts.push([s.timestamp_ms as f64 / 1000.0, max_val]);
                 }
             } else {
                 if let Some(s) = self.all_samples.get(max_idx) {
