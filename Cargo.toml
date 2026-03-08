@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["crates/fnirsi-protocol", "crates/fnirsi-cli", "crates/fnirsi-gui"]
+
+[workspace.lints.clippy]
+pedantic = "warn"
+nursery = "warn"

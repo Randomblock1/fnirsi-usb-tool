@@ -1,0 +1,24 @@
+[package]
+name = "fnirsi-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "FNIRSI USB power meter protocol library"
+
+[dependencies]
+hidapi = "2"
+btleplug = "0.11"
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+crc = "3"
+thiserror = "2"
+tracing = "0.1"
+uuid = "1"
+futures-util = "0.3"
+anyhow = "1.0"
+csv = "1.4"
+rust_xlsxwriter = "0.94.0"
+calamine = "0.33.0"
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "fnirsi-gui"
+version = "0.1.0"
+edition = "2024"
+description = "FNIRSI USB power meter native GUI"
+
+[dependencies]
+fnirsi-protocol = { path = "../fnirsi-protocol" }
+eframe = "0.31"
+egui_plot = "0.31"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rfd = "0.17"
+csv = "1"
+serde_json = "1"
+anyhow = "1.0"
+humantime = "2"
+
+[lints]
+workspace = true
