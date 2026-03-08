@@ -12,6 +12,13 @@ pub struct PlotState {
     capacity_mah: VecDeque<f32>,
     sample_capacity: usize,
     index: usize,
+    // Cached latest non-NaN values to avoid O(n) reverse scans each frame.
+    latest_voltage: Option<f64>,
+    latest_current: Option<f64>,
+    latest_power: Option<f64>,
+    latest_temp: Option<f64>,
+    latest_energy: Option<f64>,
+    latest_capacity: Option<f64>,
 }
 
 impl PlotState {
@@ -23,6 +30,12 @@ impl PlotState {
             capacity_mah: VecDeque::with_capacity(capacity),
             sample_capacity: capacity,
             index: 0,
+            latest_voltage: None,
+            latest_current: None,
+            latest_power: None,
+            latest_temp: None,
+            latest_energy: None,
+            latest_capacity: None,
         }
     }
 
@@ -37,6 +50,28 @@ impl PlotState {
         self.energy_wh.push_back(energy_wh as f32);
         self.capacity_mah.push_back(capacity_mah as f32);
         self.index += 1;
+
+        // Update cached latest non-NaN values.
+        if !sample.voltage_v.is_nan() {
+            self.latest_voltage = Some(f64::from(sample.voltage_v));
+        }
+        if !sample.current_a.is_nan() {
+            self.latest_current = Some(f64::from(sample.current_a));
+        }
+        if !sample.power_w.is_nan() {
+            self.latest_power = Some(f64::from(sample.power_w));
+        }
+        if !sample.temp_c.is_nan() {
+            self.latest_temp = Some(f64::from(sample.temp_c));
+        }
+        let ewh = energy_wh as f32;
+        if !ewh.is_nan() {
+            self.latest_energy = Some(energy_wh);
+        }
+        let cmah = capacity_mah as f32;
+        if !cmah.is_nan() {
+            self.latest_capacity = Some(capacity_mah);
+        }
     }
 
     pub fn clear(&mut self) {
@@ -44,6 +79,12 @@ impl PlotState {
         self.energy_wh.clear();
         self.capacity_mah.clear();
         self.index = 0;
+        self.latest_voltage = None;
+        self.latest_current = None;
+        self.latest_power = None;
+        self.latest_temp = None;
+        self.latest_energy = None;
+        self.latest_capacity = None;
     }
 
     /// Resize the buffer, dropping oldest entries if needed.
@@ -107,6 +148,8 @@ impl PlotState {
         let plot_width = (spacing.x.mul_add(-((cols - 1) as f32), available.x) / cols as f32).max(100.0);
         let plot_height = (spacing.y.mul_add(-((rows - 1) as f32), available.y) / rows as f32).max(100.0);
         let size = [plot_width, plot_height];
+        // Max points for min-max decimation: 4 points per pixel gives good spike fidelity.
+        let max_points = (plot_width * 4.0) as usize;
 
         ui.vertical(|ui| {
             let mut current_col = 0;
@@ -120,31 +163,27 @@ impl PlotState {
                         size,
                         |plot_ui| {
                             plot_ui.line(
-                                Line::new(self.points_from_samples(|s| f64::from(s.voltage_v)))
+                                Line::new(self.points_from_samples(|s| f64::from(s.voltage_v), max_points))
                                     .color(egui::Color32::from_rgb(100, 180, 255))
                                     .width(1.5)
                                     .name("V"),
                             );
                             if show_d {
                                 plot_ui.line(
-                                    Line::new(self.points_from_samples(|s| f64::from(s.dp_v)))
+                                    Line::new(self.points_from_samples(|s| f64::from(s.dp_v), max_points))
                                         .color(egui::Color32::from_rgb(100, 255, 100))
                                         .width(1.5)
                                         .name("D+"),
                                 );
                                 plot_ui.line(
-                                    Line::new(self.points_from_samples(|s| f64::from(s.dn_v)))
+                                    Line::new(self.points_from_samples(|s| f64::from(s.dn_v), max_points))
                                         .color(egui::Color32::from_rgb(100, 255, 255))
                                         .width(1.5)
                                         .name("D−"),
                                 );
                             }
                         },
-                        self.all_samples
-                            .iter()
-                            .rev()
-                            .find(|s| !s.voltage_v.is_nan())
-                            .map(|s| f64::from(s.voltage_v)),
+                        self.latest_voltage,
                         egui::Color32::from_rgb(100, 180, 255),
                         |x| self.value_from_samples(|s| f64::from(s.voltage_v), x),
                     );
@@ -163,17 +202,13 @@ impl PlotState {
                         size,
                         |plot_ui| {
                             plot_ui.line(
-                                Line::new(self.points_from_samples(|s| f64::from(s.current_a)))
+                                Line::new(self.points_from_samples(|s| f64::from(s.current_a), max_points))
                                     .color(egui::Color32::from_rgb(255, 100, 100))
                                     .width(1.5)
                                     .name("A"),
                             );
                         },
-                        self.all_samples
-                            .iter()
-                            .rev()
-                            .find(|s| !s.current_a.is_nan())
-                            .map(|s| f64::from(s.current_a)),
+                        self.latest_current,
                         egui::Color32::from_rgb(255, 100, 100),
                         |x| self.value_from_samples(|s| f64::from(s.current_a), x),
                     );
@@ -192,17 +227,13 @@ impl PlotState {
                         size,
                         |plot_ui| {
                             plot_ui.line(
-                                Line::new(self.points_from_samples(|s| f64::from(s.power_w)))
+                                Line::new(self.points_from_samples(|s| f64::from(s.power_w), max_points))
                                     .color(egui::Color32::from_rgb(255, 180, 80))
                                     .width(1.5)
                                     .name("W"),
                             );
                         },
-                        self.all_samples
-                            .iter()
-                            .rev()
-                            .find(|s| !s.power_w.is_nan())
-                            .map(|s| f64::from(s.power_w)),
+                        self.latest_power,
                         egui::Color32::from_rgb(255, 180, 80),
                         |x| self.value_from_samples(|s| f64::from(s.power_w), x),
                     );
@@ -221,17 +252,13 @@ impl PlotState {
                         size,
                         |plot_ui| {
                             plot_ui.line(
-                                Line::new(self.points_from_samples(|s| f64::from(s.temp_c)))
+                                Line::new(self.points_from_samples(|s| f64::from(s.temp_c), max_points))
                                     .color(egui::Color32::from_rgb(100, 220, 100))
                                     .width(1.5)
                                     .name("°C"),
                             );
                         },
-                        self.all_samples
-                            .iter()
-                            .rev()
-                            .find(|s| !s.temp_c.is_nan())
-                            .map(|s| f64::from(s.temp_c)),
+                        self.latest_temp,
                         egui::Color32::from_rgb(100, 220, 100),
                         |x| self.value_from_samples(|s| f64::from(s.temp_c), x),
                     );
@@ -251,18 +278,14 @@ impl PlotState {
                         |plot_ui| {
                             plot_ui.line(
                                 Line::new(
-                                    self.points_from_iter(self.energy_wh.iter().map(|&v| f64::from(v))),
+                                    self.points_from_iter(self.energy_wh.iter().map(|&v| f64::from(v)), max_points),
                                 )
                                 .color(egui::Color32::from_rgb(220, 220, 100))
                                 .width(1.5)
                                 .name("Wh"),
                             );
                         },
-                        self.energy_wh
-                            .iter()
-                            .rev()
-                            .find(|&&v| !v.is_nan())
-                            .map(|&v| f64::from(v)),
+                        self.latest_energy,
                         egui::Color32::from_rgb(220, 220, 100),
                         |x| self.value_from_vec(&self.energy_wh, x),
                     );
@@ -280,11 +303,11 @@ impl PlotState {
                         "mAh",
                         size,
                         |plot_ui| {
-                            // PlotPoints from iter directly
                             plot_ui.line(
                                 Line::new(
                                     self.points_from_iter(
                                         self.capacity_mah.iter().map(|&v| f64::from(v)),
+                                        max_points,
                                     ),
                                 )
                                 .color(egui::Color32::from_rgb(200, 100, 220))
@@ -292,11 +315,7 @@ impl PlotState {
                                 .name("mAh"),
                             );
                         },
-                        self.capacity_mah
-                            .iter()
-                            .rev()
-                            .find(|&&v| !v.is_nan())
-                            .map(|&v| f64::from(v)),
+                        self.latest_capacity,
                         egui::Color32::from_rgb(200, 100, 220),
                         |x| self.value_from_vec(&self.capacity_mah, x),
                     );
@@ -309,24 +328,162 @@ impl PlotState {
         });
     }
 
-    /// Build plot points by extracting a value from each sample.
-    fn points_from_samples(&self, extract: impl Fn(&Sample) -> f64) -> PlotPoints<'static> {
+    /// Build plot points by extracting a value from each sample, with min-max decimation.
+    ///
+    /// When the sample count exceeds `max_points`, the data is divided into `max_points/2`
+    /// buckets and each bucket emits two points (min and max Y in temporal order), preserving
+    /// all visual spikes. When below the threshold, all points are returned directly.
+    fn points_from_samples(
+        &self,
+        extract: impl Fn(&Sample) -> f64,
+        max_points: usize,
+    ) -> PlotPoints<'static> {
         let count = self.all_samples.len();
-        let mut pts = Vec::with_capacity(count);
-        for s in &self.all_samples {
-            pts.push([s.timestamp_ms as f64 / 1000.0, extract(s)]);
+        if count == 0 {
+            return PlotPoints::new(vec![]);
         }
+        if max_points == 0 || count <= max_points {
+            let mut pts = Vec::with_capacity(count);
+            for s in &self.all_samples {
+                pts.push([s.timestamp_ms as f64 / 1000.0, extract(s)]);
+            }
+            return PlotPoints::new(pts);
+        }
+
+        // Min-max bucket decimation.
+        let buckets = (max_points / 2).max(1);
+        let mut pts = Vec::with_capacity(buckets * 2);
+        let bucket_size = count as f64 / buckets as f64;
+
+        for b in 0..buckets {
+            let start = (b as f64 * bucket_size) as usize;
+            let end = (((b + 1) as f64 * bucket_size) as usize).min(count);
+            if start >= end {
+                continue;
+            }
+
+            let mut min_val = f64::INFINITY;
+            let mut max_val = f64::NEG_INFINITY;
+            let mut min_idx = start;
+            let mut max_idx = start;
+
+            for i in start..end {
+                let s = &self.all_samples[i];
+                let v = extract(s);
+                if v.is_nan() {
+                    continue;
+                }
+                if v < min_val {
+                    min_val = v;
+                    min_idx = i;
+                }
+                if v > max_val {
+                    max_val = v;
+                    max_idx = i;
+                }
+            }
+
+            if min_val.is_infinite() {
+                // All NaN bucket — emit a NaN sentinel to create a gap.
+                let s = &self.all_samples[start];
+                pts.push([s.timestamp_ms as f64 / 1000.0, f64::NAN]);
+            } else if min_idx <= max_idx {
+                let s_min = &self.all_samples[min_idx];
+                let s_max = &self.all_samples[max_idx];
+                pts.push([s_min.timestamp_ms as f64 / 1000.0, min_val]);
+                if min_idx != max_idx {
+                    pts.push([s_max.timestamp_ms as f64 / 1000.0, max_val]);
+                }
+            } else {
+                let s_max = &self.all_samples[max_idx];
+                let s_min = &self.all_samples[min_idx];
+                pts.push([s_max.timestamp_ms as f64 / 1000.0, max_val]);
+                pts.push([s_min.timestamp_ms as f64 / 1000.0, min_val]);
+            }
+        }
+
         PlotPoints::new(pts)
     }
 
-    /// Build plot points from an external iterator (e.g. energy/capacity).
-    fn points_from_iter(&self, extract: impl Iterator<Item = f64>) -> PlotPoints<'static> {
-        let mut pts = Vec::with_capacity(self.all_samples.len());
-        for (i, v) in extract.enumerate() {
-            if let Some(s) = self.all_samples.get(i) {
-                pts.push([s.timestamp_ms as f64 / 1000.0, v]);
+    /// Build plot points from an external iterator (e.g. energy/capacity), with min-max decimation.
+    fn points_from_iter(
+        &self,
+        extract: impl Iterator<Item = f64>,
+        max_points: usize,
+    ) -> PlotPoints<'static> {
+        let count = self.all_samples.len();
+        if count == 0 {
+            return PlotPoints::new(vec![]);
+        }
+
+        // Collect into a temporary vec so we can apply decimation.
+        let values: Vec<f64> = extract.take(count).collect();
+        let actual = values.len();
+
+        if max_points == 0 || actual <= max_points {
+            let mut pts = Vec::with_capacity(actual);
+            for (i, v) in values.into_iter().enumerate() {
+                if let Some(s) = self.all_samples.get(i) {
+                    pts.push([s.timestamp_ms as f64 / 1000.0, v]);
+                }
+            }
+            return PlotPoints::new(pts);
+        }
+
+        let buckets = (max_points / 2).max(1);
+        let mut pts = Vec::with_capacity(buckets * 2);
+        let bucket_size = actual as f64 / buckets as f64;
+
+        for b in 0..buckets {
+            let start = (b as f64 * bucket_size) as usize;
+            let end = (((b + 1) as f64 * bucket_size) as usize).min(actual);
+            if start >= end {
+                continue;
+            }
+
+            let mut min_val = f64::INFINITY;
+            let mut max_val = f64::NEG_INFINITY;
+            let mut min_idx = start;
+            let mut max_idx = start;
+
+            for i in start..end {
+                let v = values[i];
+                if v.is_nan() {
+                    continue;
+                }
+                if v < min_val {
+                    min_val = v;
+                    min_idx = i;
+                }
+                if v > max_val {
+                    max_val = v;
+                    max_idx = i;
+                }
+            }
+
+            if min_val.is_infinite() {
+                if let Some(s) = self.all_samples.get(start) {
+                    pts.push([s.timestamp_ms as f64 / 1000.0, f64::NAN]);
+                }
+            } else if min_idx <= max_idx {
+                if let Some(s) = self.all_samples.get(min_idx) {
+                    pts.push([s.timestamp_ms as f64 / 1000.0, min_val]);
+                }
+                if min_idx != max_idx {
+                    if let Some(s) = self.all_samples.get(max_idx) {
+                        pts.push([s.timestamp_ms as f64 / 1000.0, max_val]);
+                    }
+                }
+            } else {
+                if let Some(s) = self.all_samples.get(max_idx) {
+                    pts.push([s.timestamp_ms as f64 / 1000.0, max_val]);
+                }
+                if let Some(s) = self.all_samples.get(min_idx) {
+                    pts.push([s.timestamp_ms as f64 / 1000.0, min_val]);
+                }
             }
         }
+
         PlotPoints::new(pts)
     }
 

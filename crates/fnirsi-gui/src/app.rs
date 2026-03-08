@@ -421,8 +421,10 @@ impl eframe::App for FnirsiApp {
         self.process_messages();
 
         // Repaint periodically when waiting for connections, otherwise wait for GUI interaction.
+        // Use a slower rate when paused (no new data arriving) to reduce unnecessary work.
         if self.connected || self.rx.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(50));
+            let interval = if self.paused { 200 } else { 50 };
+            ctx.request_repaint_after(Duration::from_millis(interval));
         }
 
         // Top panel
