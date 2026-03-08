@@ -2,6 +2,9 @@
 
 An open-source Rust toolkit for [FNIRSI](https://www.fnirsi.cn/) USB power meters. Provides both a CLI and GUI for live data logging, offline recording conversion, and firmware updates.
 
+![Screenshot_20260308_145318](https://github.com/user-attachments/assets/5a1b73d5-54ce-4389-a448-8cc5e00b8c5c)
+
+
 ## Supported Devices
 
 | Device | USB VID:PID | Connection |
@@ -75,6 +78,12 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ## Usage
 
+### GUI
+
+```bash
+fnirsi-gui
+```
+
 ### CLI
 
 ```bash
@@ -118,18 +127,4 @@ fnirsi-cli convert recording.cfn output.parquet
 
 # Flash firmware
 fnirsi-cli flash Fnb58V1.11.ufn
-```
-
-### GUI
-
-```bash
-fnirsi-gui
-```
-
-## Logging
-
-Both tools use [`tracing`](https://docs.rs/tracing) for diagnostics. Set the `RUST_LOG` environment variable to control log verbosity:
-
-```bash
-RUST_LOG=debug fnirsi-cli log
 ```
