@@ -27,34 +27,22 @@ An open-source Rust toolkit for [FNIRSI](https://www.fnirsi.cn/) USB power meter
 - **Bluetooth LE support** — scan, connect, and stream data wirelessly from BLE-capable devices
 - **CRC validation** — optional packet integrity checking
 
-## Project Structure
+## Installation
 
-```
-fnirsi-usb-tool/
-├── crates/
-│   ├── fnirsi-protocol/   # Protocol library (USB HID, BLE, DFU, packet decoding, file I/O)
-│   ├── fnirsi-cli/        # Command-line interface
-│   └── fnirsi-gui/        # Native GUI application (eframe/egui)
-└── udev/                  # Linux udev rules for non-root USB access
-```
-
-## Building
-
-Requires a recent [Rust](https://rustup.rs/) toolchain (edition 2024).
+Requires a toolchain that support Rust 2024 edition.
 
 ```bash
-# Build everything
-cargo build --release
+# Download
+git clone https://github.com/Randomblock1/fnirsi-usb-tool
+cd fnirsi-usb-tool
 
-# Build the CLI or GUI with optional Parquet support
-cargo build --release -p fnirsi-cli --features parquet
-cargo build --release -p fnirsi-gui --features parquet
+# Without Parquet support
+cargo install --path crates/fnirsi-cli
+cargo install --path crates/fnirsi-gui
 
-# Build just the CLI
-cargo build --release -p fnirsi-cli
-
-# Build just the GUI
-cargo build --release -p fnirsi-gui
+# With Parquet support
+cargo install --path crates/fnirsi-cli --features parquet
+cargo install --path crates/fnirsi-gui --features parquet
 ```
 
 ### Linux Dependencies
@@ -67,7 +55,7 @@ sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbc
 
 ## Setup
 
-### Linux — udev Rules
+### Linux udev Rules
 
 USB HID devices require root privileges by default. Install the bundled udev rules to allow regular users to access FNIRSI devices:
 
