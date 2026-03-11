@@ -87,6 +87,37 @@ impl PlotState {
         }
     }
 
+    /// Append a sample without checking or enforcing the `sample_capacity`.
+    /// Used when importing existing files to show the complete dataset.
+    pub fn push_unlimited(&mut self, sample: &Sample, energy_wh: f64, capacity_mah: f64) {
+        self.all_samples.push_back(*sample);
+        self.energy_wh.push_back(energy_wh as f32);
+        self.capacity_mah.push_back(capacity_mah as f32);
+        self.index += 1;
+
+        // Update cached latest non-NaN values.
+        if !sample.voltage_v.is_nan() {
+            self.latest_voltage = Some(f64::from(sample.voltage_v));
+        }
+        if !sample.current_a.is_nan() {
+            self.latest_current = Some(f64::from(sample.current_a));
+        }
+        if !sample.power_w.is_nan() {
+            self.latest_power = Some(f64::from(sample.power_w));
+        }
+        if !sample.temp_c.is_nan() {
+            self.latest_temp = Some(f64::from(sample.temp_c));
+        }
+        let ewh = energy_wh as f32;
+        if !ewh.is_nan() {
+            self.latest_energy = Some(energy_wh);
+        }
+        let cmah = capacity_mah as f32;
+        if !cmah.is_nan() {
+            self.latest_capacity = Some(capacity_mah);
+        }
+    }
+
     pub fn clear(&mut self) {
         self.all_samples.clear();
         self.energy_wh.clear();

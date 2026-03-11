@@ -275,6 +275,8 @@ impl FnirsiApp {
         self.capacity_as = 0.0;
         self.duration_start_ms = self.recording_ms;
         self.plots.clear();
+        let new_cap = BUFFER_PRESETS[self.buffer_preset_idx].0;
+        self.plots.set_capacity(new_cap);
         self.clear_imported_file();
     }
 
@@ -362,7 +364,7 @@ impl FnirsiApp {
                     for s in samples {
                         let e_wh = self.energy_ws / 3600.0;
                         let c_mah = self.capacity_as / 3.6;
-                        self.plots.push(&s, e_wh, c_mah);
+                        self.plots.push_unlimited(&s, e_wh, c_mah);
 
                         let (dt, avg_power, avg_current) = prev_sample.map_or_else(
                             || (default_dt, f64::from(s.power_w), f64::from(s.current_a)),
@@ -685,6 +687,7 @@ impl eframe::App for FnirsiApp {
                             if ui
                                 .selectable_value(&mut self.buffer_preset_idx, i, *label)
                                 .changed()
+                                && self.imported_file_name.is_none()
                             {
                                 let new_cap = BUFFER_PRESETS[self.buffer_preset_idx].0;
                                 self.plots.set_capacity(new_cap);
@@ -914,18 +917,30 @@ impl eframe::App for FnirsiApp {
                         )
                     };
 
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}/{} ({mem_str}, {elapsed_str} / {cap_str} max)",
-                            self.plots.sample_count(),
-                            self.plots.capacity(),
-                        ))
-                        .monospace()
-                        .weak(),
-                    )
-                    .on_hover_text(
-                        "Samples in buffer / capacity (est. memory, elapsed / max duration)",
-                    );
+                    if self.imported_file_name.is_some() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} ({mem_str})",
+                                self.plots.sample_count(),
+                            ))
+                            .monospace()
+                            .weak(),
+                        )
+                        .on_hover_text("Total samples loaded (est. memory)");
+                    } else {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}/{} ({mem_str}, {elapsed_str} / {cap_str} max)",
+                                self.plots.sample_count(),
+                                self.plots.capacity(),
+                            ))
+                            .monospace()
+                            .weak(),
+                        )
+                        .on_hover_text(
+                            "Samples in buffer / capacity (est. memory, elapsed / max duration)",
+                        );
+                    }
                 });
             });
         });
@@ -1076,11 +1091,11 @@ fn ble_reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()
 
     rt.block_on(async {
         let _ = tx.send(DeviceMessage::Status(
-            "Scanning for Bluetooth devices (3s)...".to_string(),
+            "Scanning for Bluetooth devices (5s)...".to_string(),
         ));
 
         // Scan for available BLE devices.
-        let devices = match ble::scan_devices(Duration::from_secs(3)).await {
+        let devices = match ble::scan_devices(Duration::from_secs(5)).await {
             Ok(d) => d,
             Err(e) => {
                 let _ = tx.send(DeviceMessage::Error(format!("BLE Scan Error: {e}")));
@@ -1090,7 +1105,7 @@ fn ble_reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()
 
         let Some(device) = devices.first() else {
             let _ = tx.send(DeviceMessage::Error(
-                "No FNIRSI BLE devices found".to_string(),
+                "No FNIRSI BLE devices found. Try again".to_string(),
             ));
             return;
         };

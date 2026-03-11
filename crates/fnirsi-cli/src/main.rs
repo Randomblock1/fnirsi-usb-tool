@@ -199,10 +199,10 @@ fn cmd_info() -> Result<()> {
     }
 
     // Scan for BLE devices
-    eprintln!("  {} Scanning for Bluetooth LE devices (3s)...", "●".cyan());
+    eprintln!("  {} Scanning for Bluetooth LE devices (5s)...", "●".cyan());
     let rt = tokio::runtime::Runtime::new()?;
     let ble_devices = rt
-        .block_on(ble::scan_devices(Duration::from_secs(3)))
+        .block_on(ble::scan_devices(Duration::from_secs(5)))
         .unwrap_or_default();
 
     if ble_devices.is_empty() {
