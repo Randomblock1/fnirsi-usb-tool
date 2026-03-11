@@ -215,35 +215,44 @@ impl PlotState {
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_samples(
-                                    |s| f64::from(s.voltage_v),
-                                    max_points,
-                                    visible_x,
-                                    lod_enabled,
-                                ))
+                                Line::new(
+                                    "V",
+                                    self.points_from_samples(
+                                        |s| f64::from(s.voltage_v),
+                                        max_points,
+                                        visible_x,
+                                        lod_enabled,
+                                    ),
+                                )
                                 .color(egui::Color32::from_rgb(100, 180, 255))
                                 .width(1.5)
                                 .name("V"),
                             );
                             if config.d_lines {
                                 plot_ui.line(
-                                    Line::new(self.points_from_samples(
-                                        |s| f64::from(s.dp_v),
-                                        max_points,
-                                        visible_x,
-                                        lod_enabled,
-                                    ))
+                                    Line::new(
+                                        "D+",
+                                        self.points_from_samples(
+                                            |s| f64::from(s.dp_v),
+                                            max_points,
+                                            visible_x,
+                                            lod_enabled,
+                                        ),
+                                    )
                                     .color(egui::Color32::from_rgb(100, 255, 100))
                                     .width(1.5)
                                     .name("D+"),
                                 );
                                 plot_ui.line(
-                                    Line::new(self.points_from_samples(
-                                        |s| f64::from(s.dn_v),
-                                        max_points,
-                                        visible_x,
-                                        lod_enabled,
-                                    ))
+                                    Line::new(
+                                        "D-",
+                                        self.points_from_samples(
+                                            |s| f64::from(s.dn_v),
+                                            max_points,
+                                            visible_x,
+                                            lod_enabled,
+                                        ),
+                                    )
                                     .color(egui::Color32::from_rgb(100, 255, 255))
                                     .width(1.5)
                                     .name("D−"),
@@ -272,12 +281,15 @@ impl PlotState {
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_samples(
-                                    |s| f64::from(s.current_a),
-                                    max_points,
-                                    visible_x,
-                                    lod_enabled,
-                                ))
+                                Line::new(
+                                    "A",
+                                    self.points_from_samples(
+                                        |s| f64::from(s.current_a),
+                                        max_points,
+                                        visible_x,
+                                        lod_enabled,
+                                    ),
+                                )
                                 .color(egui::Color32::from_rgb(255, 100, 100))
                                 .width(1.5)
                                 .name("A"),
@@ -305,12 +317,15 @@ impl PlotState {
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_samples(
-                                    |s| f64::from(s.power_w),
-                                    max_points,
-                                    visible_x,
-                                    lod_enabled,
-                                ))
+                                Line::new(
+                                    "W",
+                                    self.points_from_samples(
+                                        |s| f64::from(s.power_w),
+                                        max_points,
+                                        visible_x,
+                                        lod_enabled,
+                                    ),
+                                )
                                 .color(egui::Color32::from_rgb(255, 180, 80))
                                 .width(1.5)
                                 .name("W"),
@@ -338,12 +353,15 @@ impl PlotState {
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_samples(
-                                    |s| f64::from(s.temp_c),
-                                    max_points,
-                                    visible_x,
-                                    lod_enabled,
-                                ))
+                                Line::new(
+                                    "C",
+                                    self.points_from_samples(
+                                        |s| f64::from(s.temp_c),
+                                        max_points,
+                                        visible_x,
+                                        lod_enabled,
+                                    ),
+                                )
                                 .color(egui::Color32::from_rgb(100, 220, 100))
                                 .width(1.5)
                                 .name("°C"),
@@ -371,12 +389,15 @@ impl PlotState {
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_iter(
-                                    self.energy_wh.iter().map(|&v| f64::from(v)),
-                                    max_points,
-                                    visible_x,
-                                    lod_enabled,
-                                ))
+                                Line::new(
+                                    "Wh",
+                                    self.points_from_iter(
+                                        self.energy_wh.iter().map(|&v| f64::from(v)),
+                                        max_points,
+                                        visible_x,
+                                        lod_enabled,
+                                    ),
+                                )
                                 .color(egui::Color32::from_rgb(220, 220, 100))
                                 .width(1.5)
                                 .name("Wh"),
@@ -404,12 +425,15 @@ impl PlotState {
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
                             plot_ui.line(
-                                Line::new(self.points_from_iter(
-                                    self.capacity_mah.iter().map(|&v| f64::from(v)),
-                                    max_points,
-                                    visible_x,
-                                    lod_enabled,
-                                ))
+                                Line::new(
+                                    "mAh",
+                                    self.points_from_iter(
+                                        self.capacity_mah.iter().map(|&v| f64::from(v)),
+                                        max_points,
+                                        visible_x,
+                                        lod_enabled,
+                                    ),
+                                )
                                 .color(egui::Color32::from_rgb(200, 100, 220))
                                 .width(1.5)
                                 .name("mAh"),
@@ -733,7 +757,7 @@ impl PlotState {
     ) {
         let latest_str = latest_val.map_or_else(|| "—".to_string(), |v| format!("{v:.3}"));
 
-        let mut hovered_point = None;
+        let all_samples_empty = self.all_samples.is_empty();
 
         let response = Plot::new((id, self.generation))
             .height(size[1])
@@ -743,7 +767,18 @@ impl PlotState {
             .y_axis_label(unit)
             .show_axes([true, true])
             .set_margin_fraction(egui::Vec2::ZERO)
-            .label_formatter(|_name, _value| String::new())
+            .label_formatter({
+                let value_at = &value_at;
+                move |_, value| {
+                    if all_samples_empty {
+                        "No data".to_string()
+                    } else if let Some((x, y)) = value_at(value.x) {
+                        format!("{label}: {:.3} {unit}\nTime: {:.3} s", y, x)
+                    } else {
+                        String::new()
+                    }
+                }
+            })
             .show(ui, |plot_ui| {
                 add_lines(plot_ui);
 
@@ -755,31 +790,13 @@ impl PlotState {
                     && let Some((x, y)) = value_at(pointer.x)
                 {
                     plot_ui.points(
-                        egui_plot::Points::new(vec![[x, y]])
+                        egui_plot::Points::new("hover", vec![[x, y]])
                             .radius(4.0)
                             .color(egui::Color32::WHITE)
                             .shape(egui_plot::MarkerShape::Circle),
                     );
-                    hovered_point = Some((x, y));
                 }
             });
-
-        if response.response.hovered()
-            && let Some((x, y)) = hovered_point
-        {
-            egui::show_tooltip_at_pointer(
-                ui.ctx(),
-                ui.layer_id(),
-                egui::Id::new(id).with("tooltip"),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{label}: {y:.3} {unit}\ntime: {x:.3} s"))
-                            .size(14.0)
-                            .strong(),
-                    );
-                },
-            );
-        }
 
         // Overlay title with live value
         let title_rect = response.response.rect;

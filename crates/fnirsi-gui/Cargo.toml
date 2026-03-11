@@ -10,8 +10,8 @@ parquet = ["fnirsi-protocol/parquet"]
 
 [dependencies]
 fnirsi-protocol = { path = "../fnirsi-protocol" }
-eframe = "0.31"
-egui_plot = "0.31"
+eframe = "0.33"
+egui_plot = "0.34"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
