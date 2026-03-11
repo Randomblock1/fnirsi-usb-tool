@@ -1005,25 +1005,36 @@ impl eframe::App for FnirsiApp {
             }
         }
 
-        // Central panel: plots
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let mut cfg = self.plot_config;
-            if self.connection_mode != ConnectionMode::Usb {
-                cfg.d_lines = false;
-                cfg.temperature = false;
-            }
-
-            self.plots.show(ui, cfg, self.lod_enabled);
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(
-                        "Controls: Scroll (+shift horizontal) • Ctrl+Scroll to zoom • Drag to pan • Right click drag to zoom to area • Double-click to reset",
-                    )
-                    .size(13.5),
-                );
+        // Controls hint panel (below the plots, above the status bar)
+        egui::TopBottomPanel::bottom("controls_hint")
+            .show_separator_line(false)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "Controls: Scroll (+shift horizontal) • Ctrl+Scroll to zoom • Drag to pan • Right click drag to zoom to area • Double-click to reset",
+                        )
+                        .size(13.5),
+                    );
+                });
             });
-        });
+
+        // Central panel: plots
+        egui::CentralPanel::default()
+            .frame({
+                let mut f = egui::Frame::central_panel(ctx.style().as_ref());
+                f.inner_margin.bottom = 0;
+                f
+            })
+            .show(ctx, |ui| {
+                let mut cfg = self.plot_config;
+                if self.connection_mode != ConnectionMode::Usb {
+                    cfg.d_lines = false;
+                    cfg.temperature = false;
+                }
+
+                self.plots.show(ui, cfg, self.lod_enabled);
+            });
     }
 }
 
