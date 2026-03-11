@@ -801,10 +801,13 @@ impl PlotState {
         // Overlay title with live value
         let title_rect = response.response.rect;
         let painter = ui.painter();
-        let title_text = format!("{label}: {latest_str} {unit}");
+        let title_text = match latest_val {
+            Some(v) => format!("{label}: {v:.3} {unit}"),
+            None => format!("{label}: No data"),
+        };
         painter.text(
-            egui::pos2(title_rect.left() + 5.0, title_rect.top() + 2.0),
-            egui::Align2::LEFT_TOP,
+            egui::pos2(title_rect.right() - 5.0, title_rect.top() + 2.0),
+            egui::Align2::RIGHT_TOP,
             title_text,
             egui::FontId::proportional(13.0),
             primary_color,
