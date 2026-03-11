@@ -147,13 +147,7 @@ where
         .next()
         .ok_or(BleError::DeviceNotFound)?;
 
-    // Scan for the target device by BLE address.
-    on_status(format!("Scanning for {address}..."));
-    adapter.start_scan(ScanFilter::default()).await?;
-    tokio::time::sleep(scan_duration).await;
-    adapter.stop_scan().await?;
-
-    // Find by address
+    // First, try to find the peripheral in the adapter's existing cache.
     let mut target_peripheral = None;
     for p in adapter.peripherals().await? {
         if let Some(props) = p.properties().await?
@@ -164,10 +158,27 @@ where
         }
     }
 
+    // If not found in cache, fall back to scanning for it.
+    if target_peripheral.is_none() {
+        on_status(format!("Scanning for {address}..."));
+        adapter.start_scan(ScanFilter::default()).await?;
+        tokio::time::sleep(scan_duration).await;
+        adapter.stop_scan().await?;
+
+        for p in adapter.peripherals().await? {
+            if let Some(props) = p.properties().await?
+                && props.address.to_string() == address
+            {
+                target_peripheral = Some(p);
+                break;
+            }
+        }
+    }
+
     let peripheral = target_peripheral.ok_or(BleError::DeviceNotFound)?;
 
     info!("Connecting to BLE device at {address}...");
-    on_status("Connecting...".to_string());
+    on_status("Connecting... (takes time)".to_string());
     peripheral.connect().await?;
     on_status("Discovering services...".to_string());
     peripheral.discover_services().await?;
