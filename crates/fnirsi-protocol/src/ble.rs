@@ -221,16 +221,15 @@ where
                 opt = notification_stream.next() => {
                     match opt {
                         Some(notification) => {
-                            if let Some(sample) = decode_ble_aa07(&notification.value) {
-                                if tx.send(sample).await.is_err() {
-                                    break;
-                                }
+                            if let Some(sample) = decode_ble_aa07(&notification.value)
+                                && tx.send(sample).await.is_err() {
+                                break;
                             }
                         }
                         None => break,
                     }
                 }
-                _ = tx.closed() => {
+                () = tx.closed() => {
                     break;
                 }
             }

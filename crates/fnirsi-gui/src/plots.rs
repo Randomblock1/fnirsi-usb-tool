@@ -5,6 +5,8 @@ use egui_plot::{Line, Plot, PlotPoints};
 use fnirsi_protocol::Sample;
 use std::collections::VecDeque;
 
+const POINTS_PER_PIXEL: f32 = 8.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PlotConfig {
     pub voltage: bool,
@@ -197,7 +199,6 @@ impl PlotState {
             (spacing.y.mul_add(-((rows - 1) as f32), available.y) / rows as f32).max(100.0);
         let size = [plot_width, plot_height];
         // Max points for min-max decimation (bigger = more detail, slower)
-        const POINTS_PER_PIXEL: f32 = 8.0;
         let max_points = (plot_width * POINTS_PER_PIXEL) as usize;
 
         ui.vertical(|ui| {
@@ -755,8 +756,6 @@ impl PlotState {
         primary_color: egui::Color32,
         value_at: impl Fn(f64) -> Option<(f64, f64)>,
     ) {
-        let latest_str = latest_val.map_or_else(|| "—".to_string(), |v| format!("{v:.3}"));
-
         let all_samples_empty = self.all_samples.is_empty();
 
         let response = Plot::new((id, self.generation))
@@ -773,7 +772,7 @@ impl PlotState {
                     if all_samples_empty {
                         "No data".to_string()
                     } else if let Some((x, y)) = value_at(value.x) {
-                        format!("{label}: {:.3} {unit}\nTime: {:.3} s", y, x)
+                        format!("{label}: {y:.3} {unit}\nTime: {x:.3} s")
                     } else {
                         String::new()
                     }
@@ -787,10 +786,10 @@ impl PlotState {
 
                 if is_hovered
                     && let Some(pointer) = plot_ui.pointer_coordinate()
-                    && let Some((x, y)) = value_at(pointer.x)
+                    && let Some(val) = value_at(pointer.x)
                 {
                     plot_ui.points(
-                        egui_plot::Points::new("hover", vec![[x, y]])
+                        egui_plot::Points::new("hover", vec![val.into()])
                             .radius(4.0)
                             .color(egui::Color32::WHITE)
                             .shape(egui_plot::MarkerShape::Circle),
@@ -801,10 +800,10 @@ impl PlotState {
         // Overlay title with live value
         let title_rect = response.response.rect;
         let painter = ui.painter();
-        let title_text = match latest_val {
-            Some(v) => format!("{label}: {v:.3} {unit}"),
-            None => format!("{label}: No data"),
-        };
+        let title_text = latest_val.map_or_else(
+            || format!("{label}: No data"),
+            |v| format!("{label}: {v:.3} {unit}"),
+        );
         painter.text(
             egui::pos2(title_rect.right() - 5.0, title_rect.top() + 2.0),
             egui::Align2::RIGHT_TOP,

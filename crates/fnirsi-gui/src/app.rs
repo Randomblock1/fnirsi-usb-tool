@@ -523,23 +523,22 @@ impl eframe::App for FnirsiApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if self
+        if ctx.input(|i| i.viewport().close_requested())
+            && self
                 .reader_thread_handle
                 .as_ref()
-                .map_or(false, |h| !h.is_finished())
-            {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                if !self.shutting_down {
-                    self.shutting_down = true;
-                    // Trigger disconnect to gracefully terminate the stream but don't block
-                    if let Some(stop) = self.stop_tx.take() {
-                        let _ = stop.send(());
-                    }
-                    self.rx = None;
-                    self.connected = false;
-                    self.device_info = None;
+                .is_some_and(|h| !h.is_finished())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if !self.shutting_down {
+                self.shutting_down = true;
+                // Trigger disconnect to gracefully terminate the stream but don't block
+                if let Some(stop) = self.stop_tx.take() {
+                    let _ = stop.send(());
                 }
+                self.rx = None;
+                self.connected = false;
+                self.device_info = None;
             }
         }
 
@@ -547,7 +546,7 @@ impl eframe::App for FnirsiApp {
             if self
                 .reader_thread_handle
                 .as_ref()
-                .map_or(true, |h| h.is_finished())
+                .is_none_or(std::thread::JoinHandle::is_finished)
             {
                 self.reader_thread_handle.take();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -763,35 +762,38 @@ impl eframe::App for FnirsiApp {
                         egui::StrokeKind::Outside,
                     );
                 }
-                dur_response.on_hover_text("Auto-pause after this duration (e.g. 30 or 30s = 30 sec, 5m, 2h).");
+                dur_response.on_hover_text("Auto-pause after this duration (e.g. 30s, 5m, 2h 10m 7s). Leave blank to run indefinitely.");
 
                 ui.separator();
 
-                ui.menu_button("📈 Show/Hide Graphs", |ui| {
-                    let mut toggle = |b: &mut bool, label: &str, tooltip: &str| {
-                        ui.checkbox(b, label).on_hover_text(tooltip);
-                    };
+                let button_response = ui.button("📈 Show/Hide Graphs");
+                egui::Popup::menu(&button_response)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        let mut toggle = |b: &mut bool, label: &str, tooltip: &str| {
+                            ui.checkbox(b, label).on_hover_text(tooltip);
+                        };
 
-                    toggle(&mut self.plot_config.voltage, "Voltage (V)", "Show Voltage Plot");
-                    toggle(
-                        &mut self.plot_config.d_lines,
-                        "D+/D− Lines",
-                        "Show D+/D− Data Lines on Voltage Plot",
-                    );
-                    toggle(&mut self.plot_config.current, "Current (A)", "Show Current Plot");
-                    toggle(&mut self.plot_config.power, "Power (W)", "Show Power Plot");
-                    toggle(
-                        &mut self.plot_config.temperature,
-                        "Temperature (°C)",
-                        "Show Temperature Plot",
-                    );
-                    toggle(&mut self.plot_config.energy, "Energy (Wh)", "Show Energy Plot");
-                    toggle(
-                        &mut self.plot_config.capacity,
-                        "Capacity (mAh)",
-                        "Show Capacity Plot",
-                    );
-                });
+                        toggle(&mut self.plot_config.voltage, "Voltage (V)", "Show Voltage Plot");
+                        toggle(
+                            &mut self.plot_config.d_lines,
+                            "D+/D− Lines",
+                            "Show D+/D− Data Lines on Voltage Plot",
+                        );
+                        toggle(&mut self.plot_config.current, "Current (A)", "Show Current Plot");
+                        toggle(&mut self.plot_config.power, "Power (W)", "Show Power Plot");
+                        toggle(
+                            &mut self.plot_config.temperature,
+                            "Temperature (°C)",
+                            "Show Temperature Plot",
+                        );
+                        toggle(&mut self.plot_config.energy, "Energy (Wh)", "Show Energy Plot");
+                        toggle(
+                            &mut self.plot_config.capacity,
+                            "Capacity (mAh)",
+                            "Show Capacity Plot",
+                        );
+                    });
 
                 ui.separator();
 
