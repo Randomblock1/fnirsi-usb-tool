@@ -24,7 +24,6 @@ pub struct PlotState {
     energy_wh: VecDeque<f32>,
     capacity_mah: VecDeque<f32>,
     sample_capacity: usize,
-    index: usize,
     generation: u64,
     // Cached latest non-NaN values to avoid O(n) reverse scans each frame.
     latest_voltage: Option<f64>,
@@ -43,7 +42,6 @@ impl PlotState {
             energy_wh: VecDeque::with_capacity(capacity),
             capacity_mah: VecDeque::with_capacity(capacity),
             sample_capacity: capacity,
-            index: 0,
             generation: 0,
             latest_voltage: None,
             latest_current: None,
@@ -64,7 +62,6 @@ impl PlotState {
         self.all_samples.push_back(*sample);
         self.energy_wh.push_back(energy_wh as f32);
         self.capacity_mah.push_back(capacity_mah as f32);
-        self.index += 1;
 
         // Update cached latest non-NaN values.
         if !sample.voltage_v.is_nan() {
@@ -95,7 +92,6 @@ impl PlotState {
         self.all_samples.push_back(*sample);
         self.energy_wh.push_back(energy_wh as f32);
         self.capacity_mah.push_back(capacity_mah as f32);
-        self.index += 1;
 
         // Update cached latest non-NaN values.
         if !sample.voltage_v.is_nan() {
@@ -124,7 +120,6 @@ impl PlotState {
         self.all_samples.clear();
         self.energy_wh.clear();
         self.capacity_mah.clear();
-        self.index = 0;
         self.generation += 1;
         self.latest_voltage = None;
         self.latest_current = None;
