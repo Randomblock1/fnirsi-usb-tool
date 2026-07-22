@@ -488,15 +488,19 @@ impl PlotState {
 
         let min_ms = (x_min * 1000.0) as u64;
         let max_ms = (x_max * 1000.0) as u64;
+        // `partition_point` has exact lower/upper-bound semantics (unlike `binary_search_by_key`,
+        // whose `Ok(i)` is an unspecified match among duplicate timestamps — pause/resume
+        // sequences can collide despite the app.rs NaN-sentinel +1ms nudge). Where no exact
+        // match exists this is bit-for-bit the same index the old `Err(i)` case produced; where
+        // duplicates exist it now deterministically resolves to the first (`start`) / last
+        // (`end`) matching sample instead of an arbitrary one.
         let start = self
             .all_samples
-            .binary_search_by_key(&min_ms, |s| s.timestamp_ms)
-            .unwrap_or_else(|i| i)
+            .partition_point(|s| s.timestamp_ms < min_ms)
             .saturating_sub(1);
         let end = (self
             .all_samples
-            .binary_search_by_key(&max_ms, |s| s.timestamp_ms)
-            .unwrap_or_else(|i| i)
+            .partition_point(|s| s.timestamp_ms <= max_ms)
             + 1)
         .min(count);
         (start, end)
@@ -709,10 +713,13 @@ impl PlotState {
             return None;
         }
 
+        // First index with timestamp_ms >= target_ms: identical to the old `Err(e)` insertion
+        // point when no exact match exists; on an exact match among duplicate timestamps this
+        // deterministically picks the first occurrence instead of `binary_search_by_key`'s
+        // unspecified one.
         let idx = self
             .all_samples
-            .binary_search_by_key(&target_ms, |s| s.timestamp_ms)
-            .unwrap_or_else(|e| e);
+            .partition_point(|s| s.timestamp_ms < target_ms);
 
         let idx = idx.min(self.all_samples.len().saturating_sub(1));
         self.all_samples
@@ -733,10 +740,11 @@ impl PlotState {
             return None;
         }
 
+        // See `value_from_samples`: deterministic first-occurrence instead of an unspecified
+        // duplicate index.
         let idx = self
             .all_samples
-            .binary_search_by_key(&target_ms, |s| s.timestamp_ms)
-            .unwrap_or_else(|e| e);
+            .partition_point(|s| s.timestamp_ms < target_ms);
 
         let idx = idx.min(vec.len().saturating_sub(1));
         if let (Some(s), Some(&v)) = (self.all_samples.get(idx), vec.get(idx)) {
@@ -848,5 +856,146 @@ mod tests {
         // `reserve` only pre-allocates storage; the logical sample_capacity
         // (the circular-buffer limit used by `push`) must be unchanged.
         assert_eq!(plots.capacity(), 16);
+    }
+}
+
+#[cfg(test)]
+// All float comparisons below are against exact values by construction (timestamps built from
+// whole milliseconds, voltages chosen to be exactly representable in f32), so strict equality
+// is the correct check, not an approximation smell.
+#[allow(clippy::float_cmp)]
+mod partition_point_tests {
+    use super::*;
+
+    fn sample(timestamp_ms: u64, voltage_v: f32) -> Sample {
+        Sample {
+            timestamp_ms,
+            voltage_v,
+            current_a: 0.0,
+            power_w: 0.0,
+            dp_v: 0.0,
+            dn_v: 0.0,
+            temp_c: 0.0,
+            raw_voltage: 0,
+            raw_current: 0,
+        }
+    }
+
+    /// Fixture with duplicate timestamps at 3000ms (indices 1-3) and 8000ms (indices 8-9),
+    /// as can occur when pause/resume sequences collide despite the app.rs NaN-sentinel
+    /// +1ms nudge. Per-sample voltages are distinct so tests can tell which duplicate index
+    /// was actually selected.
+    fn duplicate_fixture() -> PlotState {
+        let mut state = PlotState::new(20);
+        let voltages = [
+            (2_000, 2.0),
+            (3_000, 3.1),
+            (3_000, 3.2),
+            (3_000, 3.3),
+            (4_000, 4.0),
+            (5_000, 5.0),
+            (6_000, 6.0),
+            (7_000, 7.0),
+            (8_000, 8.1),
+            (8_000, 8.2),
+            (10_000, 10.0),
+        ];
+        for (ts, v) in voltages {
+            state.push_unlimited(&sample(ts, v), 0.0, 0.0);
+        }
+        state
+    }
+
+    #[test]
+    fn visible_range_full_when_not_zoomed() {
+        let state = duplicate_fixture();
+        assert_eq!(state.visible_range(None), (0, 11));
+    }
+
+    #[test]
+    fn visible_range_min_on_duplicate_timestamp_is_first_occurrence_minus_one() {
+        // min_ms = 3000 hits the three-way duplicate at indices 1-3; documented deterministic
+        // behavior is first-geq (index 1), so start = 0. max_ms = 3500 has no exact match, so
+        // it exercises the same insertion-point path the old `Err(i)` branch did.
+        let state = duplicate_fixture();
+        assert_eq!(state.visible_range(Some((3.0, 3.5))), (0, 5));
+    }
+
+    #[test]
+    fn visible_range_max_on_duplicate_timestamp_is_last_occurrence_plus_one() {
+        // max_ms = 8000 hits the duplicate at indices 8-9; documented deterministic behavior is
+        // last-leq, so end lands one past index 9 (plus the existing lead-out `+ 1`). min_ms =
+        // 7500 has no exact match (regression check against the old `Err(i)` path).
+        let state = duplicate_fixture();
+        assert_eq!(state.visible_range(Some((7.5, 8.0))), (7, 11));
+    }
+
+    #[test]
+    fn value_from_samples_exact_hit_on_duplicate_picks_first_occurrence() {
+        // Old `binary_search_by_key` would return an unspecified index among the three 3000ms
+        // duplicates; `partition_point` deterministically picks the first one (index 1, v=3.1).
+        let state = duplicate_fixture();
+        let (t, v) = state.value_from_samples(|s| f64::from(s.voltage_v), 3.0).unwrap();
+        assert_eq!(t, 3.0);
+        // Compare via the same f32->f64 widening the code under test uses: 3.1_f32 is not
+        // exactly representable, so a bare `3.1` f64 literal would never match.
+        assert_eq!(v, f64::from(3.1_f32));
+    }
+
+    #[test]
+    fn value_from_samples_between_samples_matches_old_insertion_point() {
+        // No exact match at 3500ms: both old (`Err(i)`) and new (`partition_point`) resolve to
+        // the next sample at 4000ms.
+        let state = duplicate_fixture();
+        let (t, v) = state.value_from_samples(|s| f64::from(s.voltage_v), 3.5).unwrap();
+        assert_eq!(t, 4.0);
+        assert_eq!(v, 4.0);
+    }
+
+    #[test]
+    fn value_from_samples_before_first_clamps_to_first() {
+        // 1500ms is before the first sample (2000ms) but within the 1000ms hover tolerance;
+        // clamps to index 0, identical to the old code's `Err(0)` case.
+        let state = duplicate_fixture();
+        let (t, v) = state.value_from_samples(|s| f64::from(s.voltage_v), 1.5).unwrap();
+        assert_eq!(t, 2.0);
+        assert_eq!(v, 2.0);
+    }
+
+    #[test]
+    fn value_from_samples_after_last_clamps_to_last() {
+        // 10500ms is after the last sample (10000ms) but within the 1000ms hover tolerance;
+        // clamps to the last index, identical to the old code's `Err(len)` case.
+        let state = duplicate_fixture();
+        let (t, v) = state.value_from_samples(|s| f64::from(s.voltage_v), 10.5).unwrap();
+        assert_eq!(t, 10.0);
+        assert_eq!(v, 10.0);
+    }
+
+    #[test]
+    fn value_from_samples_exact_hit_on_unique_timestamp_is_unchanged() {
+        // No duplicates at the last timestamp, so this is deterministic both old and new.
+        let state = duplicate_fixture();
+        let (t, v) = state.value_from_samples(|s| f64::from(s.voltage_v), 10.0).unwrap();
+        assert_eq!(t, 10.0);
+        assert_eq!(v, 10.0);
+    }
+
+    #[test]
+    fn value_from_vec_exact_hit_on_duplicate_picks_first_occurrence() {
+        let state = duplicate_fixture();
+        let vec: VecDeque<f32> = (0..11).map(|i| 100.0 + i as f32).collect();
+        let (t, v) = state.value_from_vec(&vec, 3.0).unwrap();
+        assert_eq!(t, 3.0);
+        assert_eq!(v, 101.0);
+    }
+
+    #[test]
+    fn value_from_vec_between_samples_matches_old_insertion_point() {
+        let state = duplicate_fixture();
+        let vec: VecDeque<f32> = (0..11).map(|i| 100.0 + i as f32).collect();
+        let (t, v) = state.value_from_vec(&vec, 3.5).unwrap();
+        assert_eq!(t, 4.0);
+        assert_eq!(v, 104.0);
     }
 }
