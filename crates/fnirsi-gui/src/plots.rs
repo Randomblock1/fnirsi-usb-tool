@@ -14,6 +14,40 @@ fn bucket_bounds(b: usize, slice_len: usize, buckets: usize) -> (usize, usize) {
     (b * slice_len / buckets, (b + 1) * slice_len / buckets)
 }
 
+/// Hot-path subset of a [`Sample`] kept in the scanned plot buffer.
+///
+/// Drops the export-only raw ADC registers (`raw_voltage` / `raw_current`),
+/// which are never read while plotting; those live in the parallel
+/// `raw_adc` side-buffer and are re-joined only on export. Field names mirror
+/// [`Sample`] so extraction closures and timestamp lookups read identically.
+#[derive(Debug, Clone, Copy)]
+struct PlotSample {
+    timestamp_ms: u64,
+    voltage_v: f32,
+    current_a: f32,
+    power_w: f32,
+    dp_v: f32,
+    dn_v: f32,
+    temp_c: f32,
+}
+
+// The whole point of the hot/cold split: keep the scanned sample at 32 bytes.
+const _: () = assert!(std::mem::size_of::<PlotSample>() == 32);
+
+impl From<&Sample> for PlotSample {
+    fn from(s: &Sample) -> Self {
+        Self {
+            timestamp_ms: s.timestamp_ms,
+            voltage_v: s.voltage_v,
+            current_a: s.current_a,
+            power_w: s.power_w,
+            dp_v: s.dp_v,
+            dn_v: s.dn_v,
+            temp_c: s.temp_c,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PlotConfig {
     pub voltage: bool,
@@ -27,7 +61,10 @@ pub struct PlotConfig {
 
 /// Circular-buffered storage for the real-time measurement plots.
 pub struct PlotState {
-    all_samples: VecDeque<Sample>,
+    all_samples: VecDeque<PlotSample>,
+    /// Export-only raw ADC registers `(raw_voltage, raw_current)`, kept in
+    /// lockstep with `all_samples` so the cold path can rebuild full `Sample`s.
+    raw_adc: VecDeque<(u32, u32)>,
     energy_wh: VecDeque<f32>,
     capacity_mah: VecDeque<f32>,
     sample_capacity: usize,
@@ -46,6 +83,7 @@ impl PlotState {
     pub fn new(capacity: usize) -> Self {
         Self {
             all_samples: VecDeque::with_capacity(capacity),
+            raw_adc: VecDeque::with_capacity(capacity),
             energy_wh: VecDeque::with_capacity(capacity),
             capacity_mah: VecDeque::with_capacity(capacity),
             sample_capacity: capacity,
@@ -63,10 +101,12 @@ impl PlotState {
     pub fn push(&mut self, sample: &Sample, energy_wh: f64, capacity_mah: f64) {
         if self.all_samples.len() >= self.sample_capacity {
             self.all_samples.pop_front();
+            self.raw_adc.pop_front();
             self.energy_wh.pop_front();
             self.capacity_mah.pop_front();
         }
-        self.all_samples.push_back(*sample);
+        self.all_samples.push_back(PlotSample::from(sample));
+        self.raw_adc.push_back((sample.raw_voltage, sample.raw_current));
         self.energy_wh.push_back(energy_wh as f32);
         self.capacity_mah.push_back(capacity_mah as f32);
 
@@ -97,6 +137,7 @@ impl PlotState {
     /// so `push_unlimited` doesn't repeatedly reallocate and copy as the deques grow.
     pub fn reserve(&mut self, additional: usize) {
         self.all_samples.reserve_exact(additional);
+        self.raw_adc.reserve_exact(additional);
         self.energy_wh.reserve_exact(additional);
         self.capacity_mah.reserve_exact(additional);
     }
@@ -104,7 +145,8 @@ impl PlotState {
     /// Append a sample without checking or enforcing the `sample_capacity`.
     /// Used when importing existing files to show the complete dataset.
     pub fn push_unlimited(&mut self, sample: &Sample, energy_wh: f64, capacity_mah: f64) {
-        self.all_samples.push_back(*sample);
+        self.all_samples.push_back(PlotSample::from(sample));
+        self.raw_adc.push_back((sample.raw_voltage, sample.raw_current));
         self.energy_wh.push_back(energy_wh as f32);
         self.capacity_mah.push_back(capacity_mah as f32);
 
@@ -133,6 +175,7 @@ impl PlotState {
 
     pub fn clear(&mut self) {
         self.all_samples.clear();
+        self.raw_adc.clear();
         self.energy_wh.clear();
         self.capacity_mah.clear();
         self.generation += 1;
@@ -150,6 +193,7 @@ impl PlotState {
         let excess = self.all_samples.len().saturating_sub(new_capacity);
         if excess > 0 {
             self.all_samples.drain(..excess);
+            self.raw_adc.drain(..excess);
             self.energy_wh.drain(..excess);
             self.capacity_mah.drain(..excess);
         }
@@ -163,6 +207,19 @@ impl PlotState {
         self.all_samples.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.all_samples.is_empty()
+    }
+
+    /// Retained bytes per stored sample: the hot [`PlotSample`] plus the parallel
+    /// raw-ADC tuple and the energy/capacity side-buffer floats.
+    ///
+    /// Composition: 32 (`PlotSample`) + 8 (`(u32, u32)` raw ADC) + 8 (two `f32`
+    /// side-buffers) = 48 bytes, matching the pre-split `size_of::<Sample>() + 8`.
+    pub const BYTES_PER_SAMPLE: usize = std::mem::size_of::<PlotSample>()
+        + std::mem::size_of::<(u32, u32)>()
+        + 2 * std::mem::size_of::<f32>();
+
     fn visible_x_bounds(plot_ui: &egui_plot::PlotUi) -> Option<(f64, f64)> {
         if plot_ui.auto_bounds().x {
             return None;
@@ -175,11 +232,28 @@ impl PlotState {
     }
 
     pub fn memory_bytes(&self) -> usize {
-        self.all_samples.len() * (std::mem::size_of::<Sample>() + 8)
+        self.all_samples.len() * Self::BYTES_PER_SAMPLE
     }
 
-    pub const fn samples(&self) -> &VecDeque<Sample> {
-        &self.all_samples
+    /// Rebuild full protocol [`Sample`]s for export by zipping the hot buffer
+    /// back together with the parallel raw-ADC side-buffer. Cold path — only
+    /// reached from the export dialog, so the allocation is fine.
+    pub fn export_samples(&self) -> Vec<Sample> {
+        self.all_samples
+            .iter()
+            .zip(&self.raw_adc)
+            .map(|(s, &(raw_voltage, raw_current))| Sample {
+                timestamp_ms: s.timestamp_ms,
+                voltage_v: s.voltage_v,
+                current_a: s.current_a,
+                power_w: s.power_w,
+                dp_v: s.dp_v,
+                dn_v: s.dn_v,
+                temp_c: s.temp_c,
+                raw_voltage,
+                raw_current,
+            })
+            .collect()
     }
 
     /// Draw all enabled plots in a responsive grid layout.
@@ -516,7 +590,7 @@ impl PlotState {
     /// Build plot points by extracting a value from each sample, with zoom-aware min-max decimation.
     fn points_from_samples(
         &self,
-        extract: impl Fn(&Sample) -> f64,
+        extract: impl Fn(&PlotSample) -> f64,
         max_points: usize,
         visible_x: Option<(f64, f64)>,
         lod_enabled: bool,
@@ -698,7 +772,7 @@ impl PlotState {
     }
 
     /// Look up the sample value nearest to the given X (seconds) coordinate.
-    fn value_from_samples(&self, extract: impl Fn(&Sample) -> f64, x: f64) -> Option<(f64, f64)> {
+    fn value_from_samples(&self, extract: impl Fn(&PlotSample) -> f64, x: f64) -> Option<(f64, f64)> {
         if self.all_samples.is_empty() || x < 0.0 {
             return None;
         }
@@ -850,7 +924,9 @@ mod tests {
             plots.push_unlimited(&sample(i), 0.0, 0.0);
         }
         assert_eq!(plots.sample_count(), n);
-        assert_eq!(plots.samples().len(), n);
+        assert_eq!(plots.all_samples.len(), n);
+        // `reserve` must extend the raw-ADC side-buffer too, keeping it in lockstep.
+        assert_eq!(plots.raw_adc.len(), n);
         // `reserve` only pre-allocates storage; the logical sample_capacity
         // (the circular-buffer limit used by `push`) must be unchanged.
         assert_eq!(plots.capacity(), 16);
@@ -1266,5 +1342,107 @@ mod points_from_deque_tests {
              eliminated per-frame Vec<f64> widen: {widen_ms:.4} ms/frame (sink={alloc_sink})"
         );
         assert!(sink > 0 && alloc_sink > 0);
+    }
+}
+
+#[cfg(test)]
+mod raw_adc_split_tests {
+    use super::*;
+
+    /// Build a sample whose every field is distinct so round-trips can catch
+    /// any field being dropped or crossed with another.
+    fn sample(ts: u64, base: f32, raw_voltage: u32, raw_current: u32) -> Sample {
+        Sample {
+            timestamp_ms: ts,
+            voltage_v: base,
+            current_a: base + 1.0,
+            power_w: base + 2.0,
+            dp_v: base + 3.0,
+            dn_v: base + 4.0,
+            temp_c: base + 5.0,
+            raw_voltage,
+            raw_current,
+        }
+    }
+
+    #[test]
+    fn plot_sample_is_32_bytes() {
+        assert_eq!(std::mem::size_of::<PlotSample>(), 32);
+    }
+
+    #[test]
+    fn export_round_trips_every_field_including_raw_adc() {
+        let mut state = PlotState::new(16);
+        let inputs = [
+            sample(0, 1.0, 510_000, 120_000),
+            sample(100, 2.5, 900_000, 200_000),
+            sample(200, 3.25, 1_234_567, 7_654_321),
+        ];
+        for s in &inputs {
+            state.push(s, 0.0, 0.0);
+        }
+
+        let exported = state.export_samples();
+        assert_eq!(exported.len(), inputs.len());
+        for (out, inp) in exported.iter().zip(&inputs) {
+            assert_eq!(out.timestamp_ms, inp.timestamp_ms);
+            // Compare bit patterns to keep clippy's float_cmp happy and stay exact.
+            assert_eq!(out.voltage_v.to_bits(), inp.voltage_v.to_bits());
+            assert_eq!(out.current_a.to_bits(), inp.current_a.to_bits());
+            assert_eq!(out.power_w.to_bits(), inp.power_w.to_bits());
+            assert_eq!(out.dp_v.to_bits(), inp.dp_v.to_bits());
+            assert_eq!(out.dn_v.to_bits(), inp.dn_v.to_bits());
+            assert_eq!(out.temp_c.to_bits(), inp.temp_c.to_bits());
+            assert_eq!(out.raw_voltage, inp.raw_voltage);
+            assert_eq!(out.raw_current, inp.raw_current);
+        }
+    }
+
+    #[test]
+    fn capacity_eviction_keeps_buffers_in_lockstep() {
+        let mut state = PlotState::new(3);
+        for i in 0..10u64 {
+            state.push(&sample(i * 10, i as f32, i as u32, (i * 2) as u32), 0.0, 0.0);
+        }
+        assert_eq!(state.sample_count(), 3);
+        assert_eq!(state.all_samples.len(), state.raw_adc.len());
+        assert_eq!(state.all_samples.len(), state.energy_wh.len());
+        assert_eq!(state.all_samples.len(), state.capacity_mah.len());
+
+        // Only the three newest survive, and their raw ADC stays aligned.
+        let exported = state.export_samples();
+        assert_eq!(exported[0].timestamp_ms, 70);
+        assert_eq!(exported[0].raw_voltage, 7);
+        assert_eq!(exported[0].raw_current, 14);
+        assert_eq!(exported[2].raw_voltage, 9);
+        assert_eq!(exported[2].raw_current, 18);
+    }
+
+    #[test]
+    fn set_capacity_drains_all_buffers_in_lockstep() {
+        let mut state = PlotState::new(100);
+        for i in 0..10u64 {
+            state.push_unlimited(&sample(i * 10, i as f32, i as u32, (i * 2) as u32), 0.0, 0.0);
+        }
+        state.set_capacity(4);
+        assert_eq!(state.sample_count(), 4);
+        assert_eq!(state.all_samples.len(), state.raw_adc.len());
+        assert_eq!(state.raw_adc.len(), state.energy_wh.len());
+        assert_eq!(state.energy_wh.len(), state.capacity_mah.len());
+
+        let exported = state.export_samples();
+        assert_eq!(exported.first().unwrap().timestamp_ms, 60);
+        assert_eq!(exported.first().unwrap().raw_voltage, 6);
+        assert_eq!(exported.last().unwrap().raw_voltage, 9);
+    }
+
+    #[test]
+    fn clear_empties_all_buffers() {
+        let mut state = PlotState::new(8);
+        state.push(&sample(0, 1.0, 5, 6), 1.0, 2.0);
+        state.clear();
+        assert!(state.is_empty());
+        assert!(state.raw_adc.is_empty());
+        assert!(state.export_samples().is_empty());
     }
 }

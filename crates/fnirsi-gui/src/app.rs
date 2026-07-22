@@ -83,10 +83,10 @@ impl ExportFormat {
 
 /// Buffer size presets.
 ///
-/// Each entry holds `(max_samples, display_label)`.  The per-sample overhead
-/// is the `Sample` struct plus two `f32` values for the energy/capacity
-/// side-buffers.
-const SIZEOF_SAMPLE: usize = std::mem::size_of::<Sample>() + 2 * std::mem::size_of::<f32>();
+/// Each entry holds `(max_samples, display_label)`.  The per-sample overhead is
+/// the hot plot sample plus its raw-ADC and energy/capacity side-buffers — see
+/// [`PlotState::BYTES_PER_SAMPLE`] (32 + 8 + 8 = 48 bytes).
+const SIZEOF_SAMPLE: usize = PlotState::BYTES_PER_SAMPLE;
 const BUFFER_PRESETS: &[(usize, &str)] = &[
     (100_000 / SIZEOF_SAMPLE, "100 KB"),
     (500_000 / SIZEOF_SAMPLE, "500 KB"),
@@ -313,7 +313,7 @@ impl FnirsiApp {
 
     /// Export the current buffer in the specified format via a save dialog.
     fn export_with_format(&self, fmt: ExportFormat) {
-        let samples = self.plots.samples();
+        let samples = self.plots.export_samples();
         if samples.is_empty() {
             return;
         }
@@ -844,7 +844,7 @@ impl eframe::App for FnirsiApp {
                     .button("💾 Export")
                     .on_hover_text("Export buffered samples (choose format)")
                     .clicked()
-                    && !self.plots.samples().is_empty()
+                    && !self.plots.is_empty()
                 {
                     self.show_export_dialog = true;
                 }
