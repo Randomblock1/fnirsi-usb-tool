@@ -8,6 +8,7 @@
 )]
 
 mod app;
+mod decimation;
 mod plots;
 
 fn main() -> eframe::Result<()> {
