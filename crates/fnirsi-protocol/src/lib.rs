@@ -29,4 +29,4 @@ pub mod usb;
 // Re-export key types at crate root for convenience.
 pub use device::{DeviceInfo, DeviceType};
 pub use protocol::ProtocolError;
-pub use sample::Sample;
+pub use sample::{Sample, SamplePacket};

@@ -1,7 +1,8 @@
 use crate::plots::{PlotConfig, PlotState};
 use eframe::egui;
 use fnirsi_protocol::{
-    DeviceType, ble, cfn, csv_utils, device::DeviceInfo, sample::Sample, usb::UsbDevice,
+    DeviceType, SamplePacket, ble, cfn, csv_utils, device::DeviceInfo, sample::Sample,
+    usb::UsbDevice,
 };
 use std::path::Path;
 use std::sync::mpsc;
@@ -10,10 +11,15 @@ use std::time::{Duration, Instant};
 const APP_TITLE: &str = "FNIRSI Power Meter";
 
 /// Messages sent from the reader thread to the GUI.
+///
+/// `Sample`/`Packet` mirror the shape each transport actually produces (BLE
+/// notifies one sample at a time, USB decodes 4 per HID report), so neither
+/// reader thread needs to heap-allocate a `Vec` just to hand samples over.
 pub enum DeviceMessage {
     Connected(DeviceInfo),
     Status(String),
-    Samples(Vec<Sample>),
+    Sample(Sample),
+    Packet(SamplePacket),
     Error(String),
     Disconnected,
 }
@@ -77,10 +83,10 @@ impl ExportFormat {
 
 /// Buffer size presets.
 ///
-/// Each entry holds `(max_samples, display_label)`.  The per-sample overhead
-/// is the `Sample` struct plus two `f32` values for the energy/capacity
-/// side-buffers.
-const SIZEOF_SAMPLE: usize = std::mem::size_of::<Sample>() + 2 * std::mem::size_of::<f32>();
+/// Each entry holds `(max_samples, display_label)`.  The per-sample overhead is
+/// the hot plot sample plus its raw-ADC and energy/capacity side-buffers — see
+/// [`PlotState::BYTES_PER_SAMPLE`] (32 + 8 + 8 = 48 bytes).
+const SIZEOF_SAMPLE: usize = PlotState::BYTES_PER_SAMPLE;
 const BUFFER_PRESETS: &[(usize, &str)] = &[
     (100_000 / SIZEOF_SAMPLE, "100 KB"),
     (500_000 / SIZEOF_SAMPLE, "500 KB"),
@@ -105,6 +111,25 @@ const RATE_PRESETS: &[(usize, &str)] = &[
     (100, "1 Hz"),
 ];
 
+/// Advance the downsampling countdown by one sample and report whether this
+/// sample should be kept.
+///
+/// Equivalent to the old `counter.is_multiple_of(divider)` gate but replaces
+/// a per-sample integer division/modulo with a decrement, which is cheaper
+/// and keeps the sample rate independent of `counter`'s absolute value (it
+/// never has to be reset). `divider` must be at least 1 (true for every
+/// `RATE_PRESETS` entry), otherwise `divider - 1` underflows.
+///
+/// If `divider` changes between calls (the user picks a different rate
+/// preset mid-stream), the in-flight countdown just keeps ticking down from
+/// whatever value it already held, so the gate resynchronizes to the new
+/// period within at most one old-divider period.
+const fn decimate_gate(counter: &mut usize, divider: usize) -> bool {
+    let keep = *counter == 0;
+    *counter = if keep { divider - 1 } else { *counter - 1 };
+    keep
+}
+
 /// Main application state.
 pub struct FnirsiApp {
     connected: bool,
@@ -121,7 +146,7 @@ pub struct FnirsiApp {
     buffer_preset_idx: usize,
     /// Index into `RATE_PRESETS`.
     rate_preset_idx: usize,
-    /// Native sample counter (used for downsampling).
+    /// Countdown to the next kept sample; see [`decimate_gate`].
     sample_counter: usize,
     plot_config: PlotConfig,
     lod_enabled: bool,
@@ -154,6 +179,12 @@ pub struct FnirsiApp {
 
 impl FnirsiApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        Self::default_state()
+    }
+
+    /// State shared by the real constructor and tests, which have no
+    /// `eframe::CreationContext` to pass in.
+    fn default_state() -> Self {
         Self {
             connected: false,
             device_info: None,
@@ -282,7 +313,7 @@ impl FnirsiApp {
 
     /// Export the current buffer in the specified format via a save dialog.
     fn export_with_format(&self, fmt: ExportFormat) {
-        let samples = self.plots.samples();
+        let samples = self.plots.export_samples();
         if samples.is_empty() {
             return;
         }
@@ -361,6 +392,7 @@ impl FnirsiApp {
 
                     let default_dt = 1.0 / sample_rate;
                     let mut prev_sample: Option<Sample> = None;
+                    self.plots.reserve(samples.len());
                     for s in samples {
                         let e_wh = self.energy_ws / 3600.0;
                         let c_mah = self.capacity_as / 3.6;
@@ -402,115 +434,125 @@ impl FnirsiApp {
 
     /// Drain incoming `DeviceMessage`s from the reader thread.
     fn process_messages(&mut self) {
-        if let Some(ref rx) = self.rx {
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    DeviceMessage::Status(s) => {
-                        self.status = s;
-                    }
-                    DeviceMessage::Connected(info) => {
-                        self.status = format!("Connected: {}", info.device_type);
-                        self.device_info = Some(info);
-                        self.connected = true;
-                    }
-                    DeviceMessage::Samples(samples) => {
-                        let divider = RATE_PRESETS[self.rate_preset_idx].0;
-                        for s in samples {
-                            // Check duration limit against sample timestamp so it
-                            // triggers as soon as the first over-limit sample arrives,
-                            // not on the next GUI repaint (which could be ~50ms later).
-                            if self.connected
-                                && !self.paused
-                                && let Some(limit) = self.duration_limit
-                            {
-                                let elapsed_ms =
-                                    s.timestamp_ms.saturating_sub(self.duration_start_ms);
-                                if elapsed_ms >= limit.as_millis() as u64 {
-                                    tracing::info!("Duration limit reached ({limit:?}), pausing.");
-                                    self.status = format!(
-                                        "Duration elapsed ({}), paused.",
-                                        self.duration_input.trim()
-                                    );
-                                    self.paused = true;
-                                    // Insert a NaN sentinel to visually
-                                    // break the plot line at this point.
-                                    let mut sentinel = s;
-                                    sentinel.timestamp_ms += 1;
-                                    sentinel.voltage_v = f32::NAN;
-                                    sentinel.current_a = f32::NAN;
-                                    sentinel.power_w = f32::NAN;
-                                    sentinel.dp_v = f32::NAN;
-                                    sentinel.dn_v = f32::NAN;
-                                    sentinel.temp_c = f32::NAN;
-                                    self.plots.push(&sentinel, f64::NAN, f64::NAN);
-                                    self.latest = Some(s);
-                                    // Skip remaining samples in batch.
-                                    break;
-                                }
-                            }
-
-                            if !self.paused {
-                                let (dt, avg_power, avg_current) = self.latest.map_or_else(
-                                    || (0.0, f64::from(s.power_w), f64::from(s.current_a)),
-                                    |prev| {
-                                        (
-                                            s.timestamp_ms.saturating_sub(prev.timestamp_ms) as f64
-                                                / 1000.0,
-                                            f64::midpoint(
-                                                f64::from(s.power_w),
-                                                f64::from(prev.power_w),
-                                            ),
-                                            f64::midpoint(
-                                                f64::from(s.current_a),
-                                                f64::from(prev.current_a),
-                                            ),
-                                        )
-                                    },
-                                );
-
-                                if dt > 0.0 {
-                                    self.energy_ws += avg_power * dt;
-                                    self.capacity_as += avg_current * dt;
-                                }
-
-                                if self.sample_counter.is_multiple_of(divider)
-                                    && (self.circular_buffer
-                                        || self.plots.sample_count() < self.plots.capacity())
-                                {
-                                    let e_wh = self.energy_ws / 3600.0;
-                                    let c_mah = self.capacity_as / 3.6;
-                                    self.plots.push(&s, e_wh, c_mah);
-                                }
-                                self.sample_counter = self.sample_counter.wrapping_add(1);
-                            }
-                            self.latest = Some(s);
-                            self.recording_ms = s.timestamp_ms;
-                        }
-
-                        // Update status with duration progress if a limit is active.
-                        if self.connected
-                            && !self.paused
-                            && let Some(limit) = self.duration_limit
-                        {
-                            let elapsed_ms =
-                                self.recording_ms.saturating_sub(self.duration_start_ms);
-                            let elapsed_secs = elapsed_ms as f64 / 1000.0;
-                            let limit_secs = limit.as_secs_f64();
-                            self.status =
-                                format!("Recording... {elapsed_secs:.1}s / {limit_secs:.1}s");
-                        }
-                    }
-                    DeviceMessage::Error(e) => {
-                        self.status = format!("Error: {e}");
-                        self.connected = false;
-                    }
-                    DeviceMessage::Disconnected => {
-                        self.status = "Disconnected".to_string();
-                        self.connected = false;
-                    }
+        // Take the receiver out so `self` isn't borrowed while match arms below
+        // call back into `&mut self` (e.g. `process_sample_batch`); put it back
+        // once drained.
+        let Some(rx) = self.rx.take() else {
+            return;
+        };
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                DeviceMessage::Status(s) => {
+                    self.status = s;
+                }
+                DeviceMessage::Connected(info) => {
+                    self.status = format!("Connected: {}", info.device_type);
+                    self.device_info = Some(info);
+                    self.connected = true;
+                }
+                // BLE delivers one sample per notification, USB decodes 4 per HID
+                // report; both feed the same per-sample logic over a slice so it
+                // isn't duplicated per transport.
+                DeviceMessage::Sample(s) => self.process_sample_batch(std::slice::from_ref(&s)),
+                DeviceMessage::Packet(packet) => self.process_sample_batch(&packet),
+                DeviceMessage::Error(e) => {
+                    self.status = format!("Error: {e}");
+                    self.connected = false;
+                }
+                DeviceMessage::Disconnected => {
+                    self.status = "Disconnected".to_string();
+                    self.connected = false;
                 }
             }
         }
+        self.rx = Some(rx);
+    }
+
+    /// Process one arrived batch of samples (a single BLE notification or one
+    /// USB packet) through the shared per-sample logic.
+    fn process_sample_batch(&mut self, batch: &[Sample]) {
+        let divider = RATE_PRESETS[self.rate_preset_idx].0;
+        for &s in batch {
+            if !self.process_one_sample(s, divider) {
+                // Duration limit was hit; skip remaining samples in this batch.
+                break;
+            }
+        }
+
+        // Update status with duration progress if a limit is active.
+        if self.connected
+            && !self.paused
+            && let Some(limit) = self.duration_limit
+        {
+            let elapsed_ms = self.recording_ms.saturating_sub(self.duration_start_ms);
+            let elapsed_secs = elapsed_ms as f64 / 1000.0;
+            let limit_secs = limit.as_secs_f64();
+            self.status = format!("Recording... {elapsed_secs:.1}s / {limit_secs:.1}s");
+        }
+    }
+
+    /// Fold a single sample into the running energy/capacity totals and the
+    /// plot buffers. Returns `false` if the duration limit was just reached,
+    /// telling the caller to stop feeding it further samples from this batch.
+    fn process_one_sample(&mut self, s: Sample, divider: usize) -> bool {
+        // Check duration limit against sample timestamp so it triggers as soon
+        // as the first over-limit sample arrives, not on the next GUI repaint
+        // (which could be ~50ms later).
+        if self.connected
+            && !self.paused
+            && let Some(limit) = self.duration_limit
+        {
+            let elapsed_ms = s.timestamp_ms.saturating_sub(self.duration_start_ms);
+            if elapsed_ms >= limit.as_millis() as u64 {
+                tracing::info!("Duration limit reached ({limit:?}), pausing.");
+                self.status = format!(
+                    "Duration elapsed ({}), paused.",
+                    self.duration_input.trim()
+                );
+                self.paused = true;
+                // Insert a NaN sentinel to visually break the plot line here.
+                let mut sentinel = s;
+                sentinel.timestamp_ms += 1;
+                sentinel.voltage_v = f32::NAN;
+                sentinel.current_a = f32::NAN;
+                sentinel.power_w = f32::NAN;
+                sentinel.dp_v = f32::NAN;
+                sentinel.dn_v = f32::NAN;
+                sentinel.temp_c = f32::NAN;
+                self.plots.push(&sentinel, f64::NAN, f64::NAN);
+                self.latest = Some(s);
+                return false;
+            }
+        }
+
+        if !self.paused {
+            let (dt, avg_power, avg_current) = self.latest.map_or_else(
+                || (0.0, f64::from(s.power_w), f64::from(s.current_a)),
+                |prev| {
+                    (
+                        s.timestamp_ms.saturating_sub(prev.timestamp_ms) as f64 / 1000.0,
+                        f64::midpoint(f64::from(s.power_w), f64::from(prev.power_w)),
+                        f64::midpoint(f64::from(s.current_a), f64::from(prev.current_a)),
+                    )
+                },
+            );
+
+            if dt > 0.0 {
+                self.energy_ws += avg_power * dt;
+                self.capacity_as += avg_current * dt;
+            }
+
+            if decimate_gate(&mut self.sample_counter, divider)
+                && (self.circular_buffer || self.plots.sample_count() < self.plots.capacity())
+            {
+                let e_wh = self.energy_ws / 3600.0;
+                let c_mah = self.capacity_as / 3.6;
+                self.plots.push(&s, e_wh, c_mah);
+            }
+        }
+        self.latest = Some(s);
+        self.recording_ms = s.timestamp_ms;
+        true
     }
 }
 
@@ -802,7 +844,7 @@ impl eframe::App for FnirsiApp {
                     .button("💾 Export")
                     .on_hover_text("Export buffered samples (choose format)")
                     .clicked()
-                    && !self.plots.samples().is_empty()
+                    && !self.plots.is_empty()
                 {
                     self.show_export_dialog = true;
                 }
@@ -1074,7 +1116,7 @@ fn reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()>, v
                     s.timestamp_ms = (sample_index + i as u64) * 10;
                 }
                 sample_index += samples.len() as u64;
-                if tx.send(DeviceMessage::Samples(samples.to_vec())).is_err() {
+                if tx.send(DeviceMessage::Packet(samples)).is_err() {
                     return;
                 }
             }
@@ -1162,7 +1204,7 @@ fn ble_reader_thread(tx: mpsc::Sender<DeviceMessage>, stop_rx: mpsc::Receiver<()
             match tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
                 Ok(Some(mut sample)) => {
                     sample.timestamp_ms = start_time.elapsed().as_millis() as u64;
-                    if tx.send(DeviceMessage::Samples(vec![sample])).is_err() {
+                    if tx.send(DeviceMessage::Sample(sample)).is_err() {
                         break;
                     }
                 }
@@ -1192,5 +1234,168 @@ fn parse_duration_str(s: &str) -> Option<Duration> {
     } else {
         let with_unit = format!("{s}s");
         humantime::parse_duration(&with_unit).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(timestamp_ms: u64, voltage_v: f32, current_a: f32) -> Sample {
+        Sample {
+            timestamp_ms,
+            voltage_v,
+            current_a,
+            power_w: voltage_v * current_a,
+            dp_v: 0.0,
+            dn_v: 0.0,
+            temp_c: 0.0,
+            raw_voltage: 0,
+            raw_current: 0,
+        }
+    }
+
+    /// `DeviceMessage` travels through an `mpsc` channel; each `send` heap-allocates
+    /// one node sized for the largest variant. Measured here (64-bit): `Sample` =
+    /// 40 B, `SamplePacket` ([Sample; 4]) = 160 B, so `Packet` is now that largest
+    /// variant and `DeviceMessage` = 168 B (160 B payload + 8 B tag, 8-byte aligned).
+    /// Before this change the largest variant was `Connected(DeviceInfo)` at ~104 B
+    /// (dominated by 3x `Option<String>` + `Option<Vec<u8>>`), so every message sent
+    /// through the channel got ~60 B bigger.
+    ///
+    /// That's a real, honest cost, but it doesn't add allocations: the channel
+    /// node is one heap allocation either way. What it removes is the *second*
+    /// allocation that used to ride along on the hot path -- `samples.to_vec()`
+    /// on the USB side and `vec![sample]` on the BLE side, both now gone. USB
+    /// packets arrive as a unit of 4 already-decoded samples, so `Packet` keeps
+    /// that shape instead of exploding it into 4 separate `Sample` sends (which
+    /// would avoid the size bump but quadruple the number of channel operations
+    /// on the USB path for every packet). Given USB packets arrive at ~25 Hz and
+    /// BLE samples at ~10 Hz, trading a fixed, inline size increase for one fewer
+    /// allocation and fewer channel round-trips per packet is the right call here.
+    #[test]
+    fn device_message_size() {
+        assert_eq!(std::mem::size_of::<Sample>(), 40);
+        assert_eq!(std::mem::size_of::<SamplePacket>(), 160);
+        assert_eq!(std::mem::size_of::<DeviceMessage>(), 168);
+    }
+
+    #[test]
+    fn process_one_sample_accumulates_energy_and_updates_latest() {
+        let mut app = FnirsiApp::default_state();
+        app.connected = true;
+
+        assert!(app.process_one_sample(sample(0, 5.0, 1.0), 1));
+        assert_eq!(app.latest.map(|s| s.timestamp_ms), Some(0));
+        assert!(app.energy_ws.abs() < 1e-9); // first sample has no preceding dt
+
+        // 1000 ms later at the same power -> 5 W held for 1 s = 5 Ws of energy.
+        assert!(app.process_one_sample(sample(1000, 5.0, 1.0), 1));
+        assert!((app.energy_ws - 5.0).abs() < 1e-9);
+        assert!((app.capacity_as - 1.0).abs() < 1e-9);
+        assert_eq!(app.latest.map(|s| s.timestamp_ms), Some(1000));
+        assert_eq!(app.recording_ms, 1000);
+    }
+
+    #[test]
+    fn process_one_sample_stops_batch_at_duration_limit() {
+        let mut app = FnirsiApp::default_state();
+        app.connected = true;
+        app.duration_limit = Some(Duration::from_millis(500));
+        app.duration_start_ms = 0;
+
+        assert!(app.process_one_sample(sample(0, 5.0, 1.0), 1));
+        assert!(!app.paused);
+
+        // Past the 500 ms limit: should pause and tell the caller to stop.
+        let keep_going = app.process_one_sample(sample(600, 5.0, 1.0), 1);
+        assert!(!keep_going);
+        assert!(app.paused);
+    }
+
+    #[test]
+    fn process_sample_batch_processes_every_sample_in_a_packet() {
+        let mut app = FnirsiApp::default_state();
+        app.connected = true;
+
+        let packet: SamplePacket = [
+            sample(0, 1.0, 1.0),
+            sample(10, 1.0, 1.0),
+            sample(20, 1.0, 1.0),
+            sample(30, 1.0, 1.0),
+        ];
+        app.process_sample_batch(&packet);
+
+        assert_eq!(app.recording_ms, 30);
+        assert_eq!(app.plots.sample_count(), 4);
+    }
+}
+
+
+#[cfg(test)]
+mod decimate_gate_tests {
+    use super::*;
+
+    /// Run `decimate_gate` over `n` samples and return which indices were kept.
+    fn kept_indices(divider: usize, n: usize) -> Vec<usize> {
+        let mut counter = 0usize;
+        (0..n)
+            .filter(|_| decimate_gate(&mut counter, divider))
+            .collect()
+    }
+
+    #[test]
+    fn decimate_gate_keeps_first_sample() {
+        for &(divider, _) in RATE_PRESETS {
+            let mut counter = 0usize;
+            assert!(
+                decimate_gate(&mut counter, divider),
+                "first sample must be kept for divider {divider}"
+            );
+        }
+    }
+
+    #[test]
+    fn decimate_gate_keeps_exactly_one_in_n() {
+        for divider in [1usize, 2, 5, 100] {
+            let n = divider * 10;
+            let kept = kept_indices(divider, n);
+            assert_eq!(
+                kept.len(),
+                n / divider,
+                "divider {divider} should keep exactly 1-in-{divider} samples"
+            );
+            // Kept samples land on 0, divider, 2*divider, ...
+            let expected: Vec<usize> = (0..n).step_by(divider).collect();
+            assert_eq!(kept, expected, "divider {divider} kept wrong indices");
+        }
+    }
+
+    #[test]
+    fn decimate_gate_never_underflows_for_rate_presets() {
+        // All RATE_PRESETS dividers are >= 1, so `divider - 1` must never
+        // underflow regardless of how many samples are fed through.
+        for &(divider, _) in RATE_PRESETS {
+            let mut counter = 0usize;
+            for _ in 0..(divider * 3 + 5) {
+                decimate_gate(&mut counter, divider);
+            }
+        }
+    }
+
+    #[test]
+    fn decimate_gate_resyncs_after_divider_change() {
+        // Start at 1-in-5, take one sample (kept), then switch to 1-in-2
+        // mid-countdown. The in-flight countdown (4 remaining) should run
+        // out before the new period takes over, then settle into 1-in-2.
+        let mut counter = 0usize;
+        assert!(decimate_gate(&mut counter, 5)); // sample 0: kept, counter -> 4
+        assert!(!decimate_gate(&mut counter, 2)); // sample 1: counter 4 -> 3
+        assert!(!decimate_gate(&mut counter, 2)); // sample 2: counter 3 -> 2
+        assert!(!decimate_gate(&mut counter, 2)); // sample 3: counter 2 -> 1
+        assert!(!decimate_gate(&mut counter, 2)); // sample 4: counter 1 -> 0
+        assert!(decimate_gate(&mut counter, 2)); // sample 5: kept, counter -> 1
+        assert!(!decimate_gate(&mut counter, 2)); // sample 6
+        assert!(decimate_gate(&mut counter, 2)); // sample 7: kept, now on new period
     }
 }

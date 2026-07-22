@@ -89,6 +89,13 @@ pub const fn keepalive_interval(is_fnb58_variant: bool) -> std::time::Duration {
     }
 }
 
+/// Raw voltage/current LSB = 10 uV / 10 uA.
+const VI_SCALE: f32 = 1.0 / 100_000.0;
+/// Raw D+/D- LSB = 1 mV.
+const DATA_LINE_SCALE: f32 = 1.0 / 1_000.0;
+/// Raw temperature LSB = 0.1 degC.
+const TEMP_SCALE: f32 = 1.0 / 10.0;
+
 /// Decode a single 15-byte sample from within a data packet.
 fn decode_sample(data: &[u8]) -> Sample {
     debug_assert!(data.len() >= SAMPLE_SIZE);
@@ -100,17 +107,17 @@ fn decode_sample(data: &[u8]) -> Sample {
     // data[12] is an unknown constant (always 0x01).
     let temp_raw = u16::from_le_bytes([data[13], data[14]]);
 
-    let voltage_v = raw_voltage as f32 / 100_000.0;
-    let current_a = raw_current as f32 / 100_000.0;
+    let voltage_v = raw_voltage as f32 * VI_SCALE;
+    let current_a = raw_current as f32 * VI_SCALE;
 
     Sample {
         timestamp_ms: 0,
         voltage_v,
         current_a,
         power_w: voltage_v * current_a,
-        dp_v: f32::from(dp_raw) / 1_000.0,
-        dn_v: f32::from(dn_raw) / 1_000.0,
-        temp_c: f32::from(temp_raw) / 10.0,
+        dp_v: f32::from(dp_raw) * DATA_LINE_SCALE,
+        dn_v: f32::from(dn_raw) * DATA_LINE_SCALE,
+        temp_c: f32::from(temp_raw) * TEMP_SCALE,
         raw_voltage,
         raw_current,
     }

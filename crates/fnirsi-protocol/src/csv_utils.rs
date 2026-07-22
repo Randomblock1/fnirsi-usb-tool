@@ -55,12 +55,11 @@ pub fn write_jsonl<'a>(
     let file = std::fs::File::create(path)?;
     let mut wtr = std::io::BufWriter::new(file);
     for s in samples {
-        let line = if include_usb_fields {
-            serde_json::to_string(s)?
+        if include_usb_fields {
+            serde_json::to_writer(&mut wtr, s)?;
         } else {
-            serde_json::to_string(&BleSampleView::from(s))?
-        };
-        wtr.write_all(line.as_bytes())?;
+            serde_json::to_writer(&mut wtr, &BleSampleView::from(s))?;
+        }
         wtr.write_all(b"\n")?;
     }
     wtr.flush()?;
@@ -162,6 +161,9 @@ pub fn read_xlsx(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
         let mut rows = range.rows();
         let header = rows.next().context("Empty sheet")?;
 
+        // Resolve each column name to its index once, mirroring the Parquet
+        // reader's per-batch `column_index` resolution, instead of hashing
+        // the same 9 constant names on every row.
         let mut idx_map = std::collections::HashMap::new();
         for (i, cell) in header.iter().enumerate() {
             if let Some(s) = cell.get_string() {
@@ -169,25 +171,33 @@ pub fn read_xlsx(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
             }
         }
 
-        for row in rows {
-            let get_num = |name: &str| -> f64 {
-                idx_map
-                    .get(name)
-                    .and_then(|&idx| row.get(idx))
-                    .and_then(|c: &Data| c.get_float().or_else(|| c.get_int().map(|i| i as f64)))
-                    .unwrap_or(0.0)
-            };
+        let timestamp_idx = idx_map.get("timestamp_ms").copied();
+        let voltage_idx = idx_map.get("voltage_v").copied();
+        let current_idx = idx_map.get("current_a").copied();
+        let power_idx = idx_map.get("power_w").copied();
+        let dp_idx = idx_map.get("dp_v").copied();
+        let dn_idx = idx_map.get("dn_v").copied();
+        let temp_idx = idx_map.get("temp_c").copied();
+        let raw_voltage_idx = idx_map.get("raw_voltage").copied();
+        let raw_current_idx = idx_map.get("raw_current").copied();
 
+        let get_num = |row: &[Data], idx: Option<usize>| -> f64 {
+            idx.and_then(|idx| row.get(idx))
+                .and_then(|c: &Data| c.get_float().or_else(|| c.get_int().map(|i| i as f64)))
+                .unwrap_or(0.0)
+        };
+
+        for row in rows {
             samples.push(Sample {
-                timestamp_ms: get_num("timestamp_ms") as u64,
-                voltage_v: get_num("voltage_v") as f32,
-                current_a: get_num("current_a") as f32,
-                power_w: get_num("power_w") as f32,
-                dp_v: get_num("dp_v") as f32,
-                dn_v: get_num("dn_v") as f32,
-                temp_c: get_num("temp_c") as f32,
-                raw_voltage: get_num("raw_voltage") as u32,
-                raw_current: get_num("raw_current") as u32,
+                timestamp_ms: get_num(row, timestamp_idx) as u64,
+                voltage_v: get_num(row, voltage_idx) as f32,
+                current_a: get_num(row, current_idx) as f32,
+                power_w: get_num(row, power_idx) as f32,
+                dp_v: get_num(row, dp_idx) as f32,
+                dn_v: get_num(row, dn_idx) as f32,
+                temp_c: get_num(row, temp_idx) as f32,
+                raw_voltage: get_num(row, raw_voltage_idx) as u32,
+                raw_current: get_num(row, raw_current_idx) as u32,
             });
         }
     }
@@ -296,35 +306,59 @@ pub fn read_parquet(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
     };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    fn numeric_value(array: &dyn Array, row: usize) -> Option<f64> {
-        if array.is_null(row) {
-            return None;
-        }
-
-        if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
-            Some(f64::from(values.value(row)))
-        } else if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-            Some(values.value(row))
-        } else if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
-            Some(values.value(row) as f64)
-        } else if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
-            Some(values.value(row) as f64)
-        } else if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
-            Some(values.value(row) as f64)
-        } else {
-            array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .map(|values| values.value(row) as f64)
-        }
+    // A column's Arrow type is invariant across a RecordBatch, so resolve each
+    // named column to a typed accessor once per batch and keep the per-cell
+    // work in the row loop to a null check plus a value read. All six numeric
+    // variants are retained so foreign parquet files (which may use wider or
+    // signed integer/float widths than we write) still ingest.
+    enum Col<'a> {
+        F32(&'a Float32Array),
+        F64(&'a Float64Array),
+        U64(&'a UInt64Array),
+        U32(&'a UInt32Array),
+        I64(&'a Int64Array),
+        I32(&'a Int32Array),
+        Absent,
     }
 
-    fn column_index(batch: &RecordBatch, name: &str) -> Option<usize> {
-        batch.schema().index_of(name).ok()
-    }
+    impl<'a> Col<'a> {
+        fn resolve(batch: &'a RecordBatch, name: &str) -> Self {
+            let Ok(idx) = batch.schema().index_of(name) else {
+                return Col::Absent;
+            };
+            let any = batch.column(idx).as_any();
+            if let Some(values) = any.downcast_ref::<Float32Array>() {
+                return Col::F32(values);
+            }
+            if let Some(values) = any.downcast_ref::<Float64Array>() {
+                return Col::F64(values);
+            }
+            if let Some(values) = any.downcast_ref::<UInt64Array>() {
+                return Col::U64(values);
+            }
+            if let Some(values) = any.downcast_ref::<UInt32Array>() {
+                return Col::U32(values);
+            }
+            if let Some(values) = any.downcast_ref::<Int64Array>() {
+                return Col::I64(values);
+            }
+            if let Some(values) = any.downcast_ref::<Int32Array>() {
+                return Col::I32(values);
+            }
+            Col::Absent
+        }
 
-    fn value_at(batch: &RecordBatch, column_idx: Option<usize>, row: usize) -> Option<f64> {
-        column_idx.and_then(|idx| numeric_value(batch.column(idx).as_ref(), row))
+        fn at(&self, row: usize) -> Option<f64> {
+            match self {
+                Col::F32(values) => (!values.is_null(row)).then(|| f64::from(values.value(row))),
+                Col::F64(values) => (!values.is_null(row)).then(|| values.value(row)),
+                Col::U64(values) => (!values.is_null(row)).then(|| values.value(row) as f64),
+                Col::U32(values) => (!values.is_null(row)).then(|| f64::from(values.value(row))),
+                Col::I64(values) => (!values.is_null(row)).then(|| values.value(row) as f64),
+                Col::I32(values) => (!values.is_null(row)).then(|| f64::from(values.value(row))),
+                Col::Absent => None,
+            }
+        }
     }
 
     let file = std::fs::File::open(path)?;
@@ -333,32 +367,123 @@ pub fn read_parquet(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
 
     for batch in reader {
         let batch = batch?;
-        let timestamp_col = column_index(&batch, "timestamp_ms");
-        let voltage_col = column_index(&batch, "voltage_v");
-        let current_col = column_index(&batch, "current_a");
-        let power_col = column_index(&batch, "power_w");
-        let dp_col = column_index(&batch, "dp_v");
-        let dn_col = column_index(&batch, "dn_v");
-        let temp_col = column_index(&batch, "temp_c");
-        let raw_voltage_col = column_index(&batch, "raw_voltage");
-        let raw_current_col = column_index(&batch, "raw_current");
+        let timestamp = Col::resolve(&batch, "timestamp_ms");
+        let voltage = Col::resolve(&batch, "voltage_v");
+        let current = Col::resolve(&batch, "current_a");
+        let power = Col::resolve(&batch, "power_w");
+        let dp = Col::resolve(&batch, "dp_v");
+        let dn = Col::resolve(&batch, "dn_v");
+        let temp = Col::resolve(&batch, "temp_c");
+        let raw_voltage = Col::resolve(&batch, "raw_voltage");
+        let raw_current = Col::resolve(&batch, "raw_current");
 
         for row in 0..batch.num_rows() {
             samples.push(Sample {
-                timestamp_ms: value_at(&batch, timestamp_col, row).unwrap_or(0.0) as u64,
-                voltage_v: value_at(&batch, voltage_col, row).unwrap_or(0.0) as f32,
-                current_a: value_at(&batch, current_col, row).unwrap_or(0.0) as f32,
-                power_w: value_at(&batch, power_col, row).unwrap_or(0.0) as f32,
-                dp_v: value_at(&batch, dp_col, row).unwrap_or(0.0) as f32,
-                dn_v: value_at(&batch, dn_col, row).unwrap_or(0.0) as f32,
-                temp_c: value_at(&batch, temp_col, row).unwrap_or(0.0) as f32,
-                raw_voltage: value_at(&batch, raw_voltage_col, row).unwrap_or(0.0) as u32,
-                raw_current: value_at(&batch, raw_current_col, row).unwrap_or(0.0) as u32,
+                timestamp_ms: timestamp.at(row).unwrap_or(0.0) as u64,
+                voltage_v: voltage.at(row).unwrap_or(0.0) as f32,
+                current_a: current.at(row).unwrap_or(0.0) as f32,
+                power_w: power.at(row).unwrap_or(0.0) as f32,
+                dp_v: dp.at(row).unwrap_or(0.0) as f32,
+                dn_v: dn.at(row).unwrap_or(0.0) as f32,
+                temp_c: temp.at(row).unwrap_or(0.0) as f32,
+                raw_voltage: raw_voltage.at(row).unwrap_or(0.0) as u32,
+                raw_current: raw_current.at(row).unwrap_or(0.0) as u32,
             });
         }
     }
 
     Ok(samples)
+}
+
+#[cfg(test)]
+mod jsonl_tests {
+    use super::{read_jsonl, write_jsonl};
+    use crate::sample::Sample;
+
+    fn samples() -> [Sample; 2] {
+        [
+            Sample {
+                timestamp_ms: 100,
+                voltage_v: 5.1,
+                current_a: 1.2,
+                power_w: 6.12,
+                dp_v: 0.8,
+                dn_v: 0.1,
+                temp_c: 31.5,
+                raw_voltage: 510_000,
+                raw_current: 120_000,
+            },
+            Sample {
+                timestamp_ms: 110,
+                voltage_v: 9.0,
+                current_a: 2.0,
+                power_w: 18.0,
+                dp_v: 0.0,
+                dn_v: 0.0,
+                temp_c: 32.0,
+                raw_voltage: 900_000,
+                raw_current: 200_000,
+            },
+        ]
+    }
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fnirsi-protocol-{tag}-{unique}-{}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn jsonl_round_trip_preserves_samples_with_usb_fields() {
+        let samples = samples();
+        let path = temp_path("jsonl-usb");
+
+        write_jsonl(&path, samples.iter(), true).unwrap();
+        let decoded = read_jsonl(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), samples.len());
+        for (a, b) in decoded.iter().zip(samples.iter()) {
+            assert_eq!(a.timestamp_ms, b.timestamp_ms);
+            assert!((a.voltage_v - b.voltage_v).abs() < f32::EPSILON);
+            assert!((a.current_a - b.current_a).abs() < f32::EPSILON);
+            assert!((a.power_w - b.power_w).abs() < f32::EPSILON);
+            assert!((a.dp_v - b.dp_v).abs() < f32::EPSILON);
+            assert!((a.dn_v - b.dn_v).abs() < f32::EPSILON);
+            assert!((a.temp_c - b.temp_c).abs() < f32::EPSILON);
+            assert_eq!(a.raw_voltage, b.raw_voltage);
+            assert_eq!(a.raw_current, b.raw_current);
+        }
+    }
+
+    #[test]
+    fn jsonl_round_trip_preserves_samples_without_usb_fields() {
+        let samples = samples();
+        let path = temp_path("jsonl-ble");
+
+        write_jsonl(&path, samples.iter(), false).unwrap();
+        let decoded = read_jsonl(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), samples.len());
+        for (a, b) in decoded.iter().zip(samples.iter()) {
+            assert_eq!(a.timestamp_ms, b.timestamp_ms);
+            assert!((a.voltage_v - b.voltage_v).abs() < f32::EPSILON);
+            assert!((a.current_a - b.current_a).abs() < f32::EPSILON);
+            assert!((a.power_w - b.power_w).abs() < f32::EPSILON);
+            // USB-only fields are omitted from BLE output, so they deserialize to defaults.
+            assert!(a.dp_v.abs() < f32::EPSILON);
+            assert!(a.dn_v.abs() < f32::EPSILON);
+            assert!(a.temp_c.abs() < f32::EPSILON);
+            assert_eq!(a.raw_voltage, 0);
+            assert_eq!(a.raw_current, 0);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "parquet"))]
@@ -414,4 +539,181 @@ mod tests {
         assert!((decoded[0].voltage_v - samples[0].voltage_v).abs() < f32::EPSILON);
         assert!((decoded[1].power_w - samples[1].power_w).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn parquet_missing_usb_columns_default_to_zero() {
+        // Source carries non-zero USB fields; BLE-mode write drops those columns
+        // entirely, so reading back must resolve them to `Absent` and default to 0.
+        let samples = [Sample {
+            timestamp_ms: 42,
+            voltage_v: 5.0,
+            current_a: 1.0,
+            power_w: 5.0,
+            dp_v: 0.7,
+            dn_v: 0.2,
+            temp_c: 25.0,
+            raw_voltage: 12_345,
+            raw_current: 6_789,
+        }];
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fnirsi-protocol-ble-{unique}-{}.parquet",
+            std::process::id()
+        ));
+
+        write_parquet(&path, samples.iter(), false).unwrap();
+        let decoded = read_parquet(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), 1);
+        // Columns present in the BLE file are preserved.
+        assert_eq!(decoded[0].timestamp_ms, 42);
+        assert!((decoded[0].voltage_v - 5.0).abs() < f32::EPSILON);
+        assert!((decoded[0].power_w - 5.0).abs() < f32::EPSILON);
+        // Columns absent from the file default to zero.
+        assert!(decoded[0].dp_v.abs() < f32::EPSILON);
+        assert!(decoded[0].dn_v.abs() < f32::EPSILON);
+        assert!(decoded[0].temp_c.abs() < f32::EPSILON);
+        assert_eq!(decoded[0].raw_voltage, 0);
+        assert_eq!(decoded[0].raw_current, 0);
+    }
 }
+
+#[cfg(test)]
+mod xlsx_tests {
+    use super::{read_xlsx, write_xlsx};
+    use crate::sample::Sample;
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fnirsi-protocol-xlsx-{tag}-{unique}-{}.xlsx",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn full_usb_header_round_trips() {
+        let samples = [Sample {
+            timestamp_ms: 100,
+            voltage_v: 5.1,
+            current_a: 1.2,
+            power_w: 6.12,
+            dp_v: 0.8,
+            dn_v: 0.1,
+            temp_c: 31.5,
+            raw_voltage: 510_000,
+            raw_current: 120_000,
+        }];
+
+        let path = temp_path("full");
+        write_xlsx(&path, samples.iter(), true).unwrap();
+        let decoded = read_xlsx(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), 1);
+        let s = &decoded[0];
+        assert_eq!(s.timestamp_ms, 100);
+        assert!((s.voltage_v - 5.1).abs() < f32::EPSILON);
+        assert!((s.current_a - 1.2).abs() < f32::EPSILON);
+        assert!((s.power_w - 6.12).abs() < 1e-4);
+        assert!((s.dp_v - 0.8).abs() < f32::EPSILON);
+        assert!((s.dn_v - 0.1).abs() < f32::EPSILON);
+        assert!((s.temp_c - 31.5).abs() < f32::EPSILON);
+        assert_eq!(s.raw_voltage, 510_000);
+        assert_eq!(s.raw_current, 120_000);
+    }
+
+    /// BLE exports only carry the 4 common columns; the USB-only columns
+    /// must default to 0 rather than erroring or misreading adjacent cells.
+    #[test]
+    fn ble_header_subset_defaults_missing_columns() {
+        let samples = [Sample {
+            timestamp_ms: 200,
+            voltage_v: 9.0,
+            current_a: 2.0,
+            power_w: 18.0,
+            dp_v: 0.0,
+            dn_v: 0.0,
+            temp_c: 0.0,
+            raw_voltage: 0,
+            raw_current: 0,
+        }];
+
+        let path = temp_path("ble");
+        write_xlsx(&path, samples.iter(), false).unwrap();
+        let decoded = read_xlsx(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), 1);
+        let s = &decoded[0];
+        assert_eq!(s.timestamp_ms, 200);
+        assert!((s.voltage_v - 9.0).abs() < f32::EPSILON);
+        assert!((s.current_a - 2.0).abs() < f32::EPSILON);
+        assert!((s.power_w - 18.0).abs() < f32::EPSILON);
+        assert!(s.dp_v.abs() < f32::EPSILON);
+        assert!(s.dn_v.abs() < f32::EPSILON);
+        assert!(s.temp_c.abs() < f32::EPSILON);
+        assert_eq!(s.raw_voltage, 0);
+        assert_eq!(s.raw_current, 0);
+    }
+
+    /// Column order in the file must not matter: indices are resolved by
+    /// name once, then reused positionally for every row.
+    #[test]
+    fn reordered_columns_still_map_correctly() {
+        let path = temp_path("reordered");
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        let worksheet = workbook.add_worksheet();
+        worksheet
+            .write_row(
+                0,
+                0,
+                [
+                    "raw_current",
+                    "power_w",
+                    "timestamp_ms",
+                    "dn_v",
+                    "current_a",
+                    "voltage_v",
+                    "dp_v",
+                    "temp_c",
+                    "raw_voltage",
+                ],
+            )
+            .unwrap();
+        worksheet.write_number(1, 0, 130_000.0).unwrap(); // raw_current
+        worksheet.write_number(1, 1, 6.0).unwrap(); // power_w
+        worksheet.write_number(1, 2, 300.0).unwrap(); // timestamp_ms
+        worksheet.write_number(1, 3, 0.2).unwrap(); // dn_v
+        worksheet.write_number(1, 4, 1.5).unwrap(); // current_a
+        worksheet.write_number(1, 5, 4.0).unwrap(); // voltage_v
+        worksheet.write_number(1, 6, 0.9).unwrap(); // dp_v
+        worksheet.write_number(1, 7, 33.0).unwrap(); // temp_c
+        worksheet.write_number(1, 8, 520_000.0).unwrap(); // raw_voltage
+        workbook.save(&path).unwrap();
+
+        let decoded = read_xlsx(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), 1);
+        let s = &decoded[0];
+        assert_eq!(s.timestamp_ms, 300);
+        assert!((s.voltage_v - 4.0).abs() < f32::EPSILON);
+        assert!((s.current_a - 1.5).abs() < f32::EPSILON);
+        assert!((s.power_w - 6.0).abs() < f32::EPSILON);
+        assert!((s.dp_v - 0.9).abs() < f32::EPSILON);
+        assert!((s.dn_v - 0.2).abs() < f32::EPSILON);
+        assert!((s.temp_c - 33.0).abs() < f32::EPSILON);
+        assert_eq!(s.raw_voltage, 520_000);
+        assert_eq!(s.raw_current, 130_000);
+    }
+}
+
