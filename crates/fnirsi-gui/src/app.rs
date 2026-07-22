@@ -111,6 +111,25 @@ const RATE_PRESETS: &[(usize, &str)] = &[
     (100, "1 Hz"),
 ];
 
+/// Advance the downsampling countdown by one sample and report whether this
+/// sample should be kept.
+///
+/// Equivalent to the old `counter.is_multiple_of(divider)` gate but replaces
+/// a per-sample integer division/modulo with a decrement, which is cheaper
+/// and keeps the sample rate independent of `counter`'s absolute value (it
+/// never has to be reset). `divider` must be at least 1 (true for every
+/// `RATE_PRESETS` entry), otherwise `divider - 1` underflows.
+///
+/// If `divider` changes between calls (the user picks a different rate
+/// preset mid-stream), the in-flight countdown just keeps ticking down from
+/// whatever value it already held, so the gate resynchronizes to the new
+/// period within at most one old-divider period.
+const fn decimate_gate(counter: &mut usize, divider: usize) -> bool {
+    let keep = *counter == 0;
+    *counter = if keep { divider - 1 } else { *counter - 1 };
+    keep
+}
+
 /// Main application state.
 pub struct FnirsiApp {
     connected: bool,
@@ -127,7 +146,7 @@ pub struct FnirsiApp {
     buffer_preset_idx: usize,
     /// Index into `RATE_PRESETS`.
     rate_preset_idx: usize,
-    /// Native sample counter (used for downsampling).
+    /// Countdown to the next kept sample; see [`decimate_gate`].
     sample_counter: usize,
     plot_config: PlotConfig,
     lod_enabled: bool,
@@ -523,14 +542,13 @@ impl FnirsiApp {
                 self.capacity_as += avg_current * dt;
             }
 
-            if self.sample_counter.is_multiple_of(divider)
+            if decimate_gate(&mut self.sample_counter, divider)
                 && (self.circular_buffer || self.plots.sample_count() < self.plots.capacity())
             {
                 let e_wh = self.energy_ws / 3600.0;
                 let c_mah = self.capacity_as / 3.6;
                 self.plots.push(&s, e_wh, c_mah);
             }
-            self.sample_counter = self.sample_counter.wrapping_add(1);
         }
         self.latest = Some(s);
         self.recording_ms = s.timestamp_ms;
@@ -1309,6 +1327,75 @@ mod tests {
         app.process_sample_batch(&packet);
 
         assert_eq!(app.recording_ms, 30);
-        assert_eq!(app.sample_counter, 4);
+        assert_eq!(app.plots.sample_count(), 4);
+    }
+}
+
+
+#[cfg(test)]
+mod decimate_gate_tests {
+    use super::*;
+
+    /// Run `decimate_gate` over `n` samples and return which indices were kept.
+    fn kept_indices(divider: usize, n: usize) -> Vec<usize> {
+        let mut counter = 0usize;
+        (0..n)
+            .filter(|_| decimate_gate(&mut counter, divider))
+            .collect()
+    }
+
+    #[test]
+    fn decimate_gate_keeps_first_sample() {
+        for &(divider, _) in RATE_PRESETS {
+            let mut counter = 0usize;
+            assert!(
+                decimate_gate(&mut counter, divider),
+                "first sample must be kept for divider {divider}"
+            );
+        }
+    }
+
+    #[test]
+    fn decimate_gate_keeps_exactly_one_in_n() {
+        for divider in [1usize, 2, 5, 100] {
+            let n = divider * 10;
+            let kept = kept_indices(divider, n);
+            assert_eq!(
+                kept.len(),
+                n / divider,
+                "divider {divider} should keep exactly 1-in-{divider} samples"
+            );
+            // Kept samples land on 0, divider, 2*divider, ...
+            let expected: Vec<usize> = (0..n).step_by(divider).collect();
+            assert_eq!(kept, expected, "divider {divider} kept wrong indices");
+        }
+    }
+
+    #[test]
+    fn decimate_gate_never_underflows_for_rate_presets() {
+        // All RATE_PRESETS dividers are >= 1, so `divider - 1` must never
+        // underflow regardless of how many samples are fed through.
+        for &(divider, _) in RATE_PRESETS {
+            let mut counter = 0usize;
+            for _ in 0..(divider * 3 + 5) {
+                decimate_gate(&mut counter, divider);
+            }
+        }
+    }
+
+    #[test]
+    fn decimate_gate_resyncs_after_divider_change() {
+        // Start at 1-in-5, take one sample (kept), then switch to 1-in-2
+        // mid-countdown. The in-flight countdown (4 remaining) should run
+        // out before the new period takes over, then settle into 1-in-2.
+        let mut counter = 0usize;
+        assert!(decimate_gate(&mut counter, 5)); // sample 0: kept, counter -> 4
+        assert!(!decimate_gate(&mut counter, 2)); // sample 1: counter 4 -> 3
+        assert!(!decimate_gate(&mut counter, 2)); // sample 2: counter 3 -> 2
+        assert!(!decimate_gate(&mut counter, 2)); // sample 3: counter 2 -> 1
+        assert!(!decimate_gate(&mut counter, 2)); // sample 4: counter 1 -> 0
+        assert!(decimate_gate(&mut counter, 2)); // sample 5: kept, counter -> 1
+        assert!(!decimate_gate(&mut counter, 2)); // sample 6
+        assert!(decimate_gate(&mut counter, 2)); // sample 7: kept, now on new period
     }
 }
