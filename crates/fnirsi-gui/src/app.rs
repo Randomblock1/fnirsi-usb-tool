@@ -361,6 +361,7 @@ impl FnirsiApp {
 
                     let default_dt = 1.0 / sample_rate;
                     let mut prev_sample: Option<Sample> = None;
+                    self.plots.reserve(samples.len());
                     for s in samples {
                         let e_wh = self.energy_ws / 3600.0;
                         let c_mah = self.capacity_as / 3.6;

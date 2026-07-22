@@ -86,6 +86,14 @@ impl PlotState {
         }
     }
 
+    /// Pre-allocate storage for `additional` more samples ahead of a known-size bulk import,
+    /// so `push_unlimited` doesn't repeatedly reallocate and copy as the deques grow.
+    pub fn reserve(&mut self, additional: usize) {
+        self.all_samples.reserve_exact(additional);
+        self.energy_wh.reserve_exact(additional);
+        self.capacity_mah.reserve_exact(additional);
+    }
+
     /// Append a sample without checking or enforcing the `sample_capacity`.
     /// Used when importing existing files to show the complete dataset.
     pub fn push_unlimited(&mut self, sample: &Sample, energy_wh: f64, capacity_mah: f64) {
@@ -806,5 +814,39 @@ impl PlotState {
             egui::FontId::proportional(13.0),
             primary_color,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(timestamp_ms: u64) -> Sample {
+        Sample {
+            timestamp_ms,
+            voltage_v: 5.0,
+            current_a: 1.0,
+            power_w: 5.0,
+            dp_v: 0.0,
+            dn_v: 0.0,
+            temp_c: 0.0,
+            raw_voltage: 0,
+            raw_current: 0,
+        }
+    }
+
+    #[test]
+    fn reserve_then_bulk_import_preserves_lengths_and_logical_capacity() {
+        let mut plots = PlotState::new(16);
+        let n = 1_000;
+        plots.reserve(n);
+        for i in 0..n as u64 {
+            plots.push_unlimited(&sample(i), 0.0, 0.0);
+        }
+        assert_eq!(plots.sample_count(), n);
+        assert_eq!(plots.samples().len(), n);
+        // `reserve` only pre-allocates storage; the logical sample_capacity
+        // (the circular-buffer limit used by `push`) must be unchanged.
+        assert_eq!(plots.capacity(), 16);
     }
 }
