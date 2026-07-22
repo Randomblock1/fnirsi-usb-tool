@@ -295,35 +295,59 @@ pub fn read_parquet(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
     };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    fn numeric_value(array: &dyn Array, row: usize) -> Option<f64> {
-        if array.is_null(row) {
-            return None;
-        }
-
-        if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
-            Some(f64::from(values.value(row)))
-        } else if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-            Some(values.value(row))
-        } else if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
-            Some(values.value(row) as f64)
-        } else if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
-            Some(values.value(row) as f64)
-        } else if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
-            Some(values.value(row) as f64)
-        } else {
-            array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .map(|values| values.value(row) as f64)
-        }
+    // A column's Arrow type is invariant across a RecordBatch, so resolve each
+    // named column to a typed accessor once per batch and keep the per-cell
+    // work in the row loop to a null check plus a value read. All six numeric
+    // variants are retained so foreign parquet files (which may use wider or
+    // signed integer/float widths than we write) still ingest.
+    enum Col<'a> {
+        F32(&'a Float32Array),
+        F64(&'a Float64Array),
+        U64(&'a UInt64Array),
+        U32(&'a UInt32Array),
+        I64(&'a Int64Array),
+        I32(&'a Int32Array),
+        Absent,
     }
 
-    fn column_index(batch: &RecordBatch, name: &str) -> Option<usize> {
-        batch.schema().index_of(name).ok()
-    }
+    impl<'a> Col<'a> {
+        fn resolve(batch: &'a RecordBatch, name: &str) -> Self {
+            let Ok(idx) = batch.schema().index_of(name) else {
+                return Col::Absent;
+            };
+            let any = batch.column(idx).as_any();
+            if let Some(values) = any.downcast_ref::<Float32Array>() {
+                return Col::F32(values);
+            }
+            if let Some(values) = any.downcast_ref::<Float64Array>() {
+                return Col::F64(values);
+            }
+            if let Some(values) = any.downcast_ref::<UInt64Array>() {
+                return Col::U64(values);
+            }
+            if let Some(values) = any.downcast_ref::<UInt32Array>() {
+                return Col::U32(values);
+            }
+            if let Some(values) = any.downcast_ref::<Int64Array>() {
+                return Col::I64(values);
+            }
+            if let Some(values) = any.downcast_ref::<Int32Array>() {
+                return Col::I32(values);
+            }
+            Col::Absent
+        }
 
-    fn value_at(batch: &RecordBatch, column_idx: Option<usize>, row: usize) -> Option<f64> {
-        column_idx.and_then(|idx| numeric_value(batch.column(idx).as_ref(), row))
+        fn at(&self, row: usize) -> Option<f64> {
+            match self {
+                Col::F32(values) => (!values.is_null(row)).then(|| f64::from(values.value(row))),
+                Col::F64(values) => (!values.is_null(row)).then(|| values.value(row)),
+                Col::U64(values) => (!values.is_null(row)).then(|| values.value(row) as f64),
+                Col::U32(values) => (!values.is_null(row)).then(|| f64::from(values.value(row))),
+                Col::I64(values) => (!values.is_null(row)).then(|| values.value(row) as f64),
+                Col::I32(values) => (!values.is_null(row)).then(|| f64::from(values.value(row))),
+                Col::Absent => None,
+            }
+        }
     }
 
     let file = std::fs::File::open(path)?;
@@ -332,27 +356,27 @@ pub fn read_parquet(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
 
     for batch in reader {
         let batch = batch?;
-        let timestamp_col = column_index(&batch, "timestamp_ms");
-        let voltage_col = column_index(&batch, "voltage_v");
-        let current_col = column_index(&batch, "current_a");
-        let power_col = column_index(&batch, "power_w");
-        let dp_col = column_index(&batch, "dp_v");
-        let dn_col = column_index(&batch, "dn_v");
-        let temp_col = column_index(&batch, "temp_c");
-        let raw_voltage_col = column_index(&batch, "raw_voltage");
-        let raw_current_col = column_index(&batch, "raw_current");
+        let timestamp = Col::resolve(&batch, "timestamp_ms");
+        let voltage = Col::resolve(&batch, "voltage_v");
+        let current = Col::resolve(&batch, "current_a");
+        let power = Col::resolve(&batch, "power_w");
+        let dp = Col::resolve(&batch, "dp_v");
+        let dn = Col::resolve(&batch, "dn_v");
+        let temp = Col::resolve(&batch, "temp_c");
+        let raw_voltage = Col::resolve(&batch, "raw_voltage");
+        let raw_current = Col::resolve(&batch, "raw_current");
 
         for row in 0..batch.num_rows() {
             samples.push(Sample {
-                timestamp_ms: value_at(&batch, timestamp_col, row).unwrap_or(0.0) as u64,
-                voltage_v: value_at(&batch, voltage_col, row).unwrap_or(0.0) as f32,
-                current_a: value_at(&batch, current_col, row).unwrap_or(0.0) as f32,
-                power_w: value_at(&batch, power_col, row).unwrap_or(0.0) as f32,
-                dp_v: value_at(&batch, dp_col, row).unwrap_or(0.0) as f32,
-                dn_v: value_at(&batch, dn_col, row).unwrap_or(0.0) as f32,
-                temp_c: value_at(&batch, temp_col, row).unwrap_or(0.0) as f32,
-                raw_voltage: value_at(&batch, raw_voltage_col, row).unwrap_or(0.0) as u32,
-                raw_current: value_at(&batch, raw_current_col, row).unwrap_or(0.0) as u32,
+                timestamp_ms: timestamp.at(row).unwrap_or(0.0) as u64,
+                voltage_v: voltage.at(row).unwrap_or(0.0) as f32,
+                current_a: current.at(row).unwrap_or(0.0) as f32,
+                power_w: power.at(row).unwrap_or(0.0) as f32,
+                dp_v: dp.at(row).unwrap_or(0.0) as f32,
+                dn_v: dn.at(row).unwrap_or(0.0) as f32,
+                temp_c: temp.at(row).unwrap_or(0.0) as f32,
+                raw_voltage: raw_voltage.at(row).unwrap_or(0.0) as u32,
+                raw_current: raw_current.at(row).unwrap_or(0.0) as u32,
             });
         }
     }
@@ -503,5 +527,47 @@ mod tests {
         assert_eq!(decoded[1].raw_voltage, samples[1].raw_voltage);
         assert!((decoded[0].voltage_v - samples[0].voltage_v).abs() < f32::EPSILON);
         assert!((decoded[1].power_w - samples[1].power_w).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parquet_missing_usb_columns_default_to_zero() {
+        // Source carries non-zero USB fields; BLE-mode write drops those columns
+        // entirely, so reading back must resolve them to `Absent` and default to 0.
+        let samples = [Sample {
+            timestamp_ms: 42,
+            voltage_v: 5.0,
+            current_a: 1.0,
+            power_w: 5.0,
+            dp_v: 0.7,
+            dn_v: 0.2,
+            temp_c: 25.0,
+            raw_voltage: 12_345,
+            raw_current: 6_789,
+        }];
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fnirsi-protocol-ble-{unique}-{}.parquet",
+            std::process::id()
+        ));
+
+        write_parquet(&path, samples.iter(), false).unwrap();
+        let decoded = read_parquet(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), 1);
+        // Columns present in the BLE file are preserved.
+        assert_eq!(decoded[0].timestamp_ms, 42);
+        assert!((decoded[0].voltage_v - 5.0).abs() < f32::EPSILON);
+        assert!((decoded[0].power_w - 5.0).abs() < f32::EPSILON);
+        // Columns absent from the file default to zero.
+        assert!(decoded[0].dp_v.abs() < f32::EPSILON);
+        assert!(decoded[0].dn_v.abs() < f32::EPSILON);
+        assert!(decoded[0].temp_c.abs() < f32::EPSILON);
+        assert_eq!(decoded[0].raw_voltage, 0);
+        assert_eq!(decoded[0].raw_current, 0);
     }
 }
