@@ -402,8 +402,8 @@ impl PlotState {
                             plot_ui.line(
                                 Line::new(
                                     "Wh",
-                                    self.points_from_iter(
-                                        self.energy_wh.iter().map(|&v| f64::from(v)),
+                                    self.points_from_deque(
+                                        &self.energy_wh,
                                         max_points,
                                         visible_x,
                                         lod_enabled,
@@ -438,8 +438,8 @@ impl PlotState {
                             plot_ui.line(
                                 Line::new(
                                     "mAh",
-                                    self.points_from_iter(
-                                        self.capacity_mah.iter().map(|&v| f64::from(v)),
+                                    self.points_from_deque(
+                                        &self.capacity_mah,
                                         max_points,
                                         visible_x,
                                         lod_enabled,
@@ -601,10 +601,16 @@ impl PlotState {
         PlotPoints::new(pts)
     }
 
-    /// Build plot points from an external iterator (e.g. energy/capacity), with zoom-aware min-max decimation.
-    fn points_from_iter(
+    /// Build plot points from an index-synchronized `VecDeque<f32>` (e.g. energy/capacity),
+    /// with zoom-aware min-max decimation.
+    ///
+    /// `values` is kept the same length and index order as `all_samples`, so `values[i]`
+    /// pairs with `all_samples[i].timestamp_ms`. Sub-ranges are taken with `VecDeque::range`,
+    /// which positions in O(1) via the ring buffer — no per-bucket prefix walk — so each bucket
+    /// costs O(bucket) rather than the O(offset) a re-skipping iterator would.
+    fn points_from_deque(
         &self,
-        extract: impl Iterator<Item = f64>,
+        values: &VecDeque<f32>,
         max_points: usize,
         visible_x: Option<(f64, f64)>,
         lod_enabled: bool,
@@ -613,38 +619,30 @@ impl PlotState {
         if count == 0 {
             return PlotPoints::new(vec![]);
         }
-
-        // Collect into a temporary vec so we can slice by index.
-        let values: Vec<f64> = extract.take(count).collect();
-        let actual = values.len();
+        debug_assert_eq!(values.len(), self.all_samples.len());
 
         if !lod_enabled {
-            let mut pts = Vec::with_capacity(actual);
-            for (i, v) in values.iter().enumerate().take(actual) {
-                if let Some(s) = self.all_samples.get(i) {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, *v]);
-                }
+            let mut pts = Vec::with_capacity(count);
+            for (s, &v) in self.all_samples.iter().zip(values.iter()) {
+                pts.push([s.timestamp_ms as f64 / 1000.0, f64::from(v)]);
             }
             return PlotPoints::new(pts);
         }
 
-        // Reuse the same range logic (energy_wh / capacity_mah are index-synchronized with all_samples).
-        let (start_idx, end_idx) = {
-            let (s, e) = self.visible_range(visible_x);
-            (s, e.min(actual))
-        };
+        let (start_idx, end_idx) = self.visible_range(visible_x);
         let slice_len = end_idx - start_idx;
 
         if max_points == 0 || slice_len <= max_points {
             let mut pts = Vec::with_capacity(slice_len);
-            for (i, v) in values.iter().enumerate().take(end_idx).skip(start_idx) {
-                if let Some(s) = self.all_samples.get(i) {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, *v]);
-                }
+            let samples = self.all_samples.range(start_idx..end_idx);
+            let vals = values.range(start_idx..end_idx);
+            for (s, &v) in samples.zip(vals) {
+                pts.push([s.timestamp_ms as f64 / 1000.0, f64::from(v)]);
             }
             return PlotPoints::new(pts);
         }
 
+        // Min-max bucket decimation over the active slice.
         let buckets = (max_points / 2).max(1);
         let mut pts = Vec::with_capacity(buckets * 2);
 
@@ -661,11 +659,12 @@ impl PlotState {
             let mut min_idx = abs_start;
             let mut max_idx = abs_start;
 
-            for (i, v) in values.iter().enumerate().take(abs_end).skip(abs_start) {
-                let v = *v;
+            for (offset, &raw) in values.range(abs_start..abs_end).enumerate() {
+                let v = f64::from(raw);
                 if v.is_nan() {
                     continue;
                 }
+                let i = abs_start + offset;
                 if v < min_val {
                     min_val = v;
                     min_idx = i;
@@ -677,25 +676,21 @@ impl PlotState {
             }
 
             if min_val.is_infinite() {
-                if let Some(s) = self.all_samples.get(abs_start) {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, f64::NAN]);
-                }
+                // All NaN bucket — emit a NaN sentinel to create a gap.
+                let s = &self.all_samples[abs_start];
+                pts.push([s.timestamp_ms as f64 / 1000.0, f64::NAN]);
             } else if min_idx <= max_idx {
-                if let Some(s) = self.all_samples.get(min_idx) {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, min_val]);
-                }
-                if min_idx != max_idx
-                    && let Some(s) = self.all_samples.get(max_idx)
-                {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, max_val]);
+                let s_min = &self.all_samples[min_idx];
+                let s_max = &self.all_samples[max_idx];
+                pts.push([s_min.timestamp_ms as f64 / 1000.0, min_val]);
+                if min_idx != max_idx {
+                    pts.push([s_max.timestamp_ms as f64 / 1000.0, max_val]);
                 }
             } else {
-                if let Some(s) = self.all_samples.get(max_idx) {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, max_val]);
-                }
-                if let Some(s) = self.all_samples.get(min_idx) {
-                    pts.push([s.timestamp_ms as f64 / 1000.0, min_val]);
-                }
+                let s_max = &self.all_samples[max_idx];
+                let s_min = &self.all_samples[min_idx];
+                pts.push([s_max.timestamp_ms as f64 / 1000.0, max_val]);
+                pts.push([s_min.timestamp_ms as f64 / 1000.0, min_val]);
             }
         }
 
@@ -1088,5 +1083,188 @@ mod bucket_bounds_tests {
             assert_eq!(old_start, new_start, "start mismatch at bucket {b}");
             assert_eq!(old_end, new_end, "end mismatch at bucket {b}");
         }
+    }
+}
+
+#[cfg(test)]
+mod points_from_deque_tests {
+    use super::*;
+
+    const fn mk_sample(timestamp_ms: u64) -> Sample {
+        Sample {
+            timestamp_ms,
+            voltage_v: 0.0,
+            current_a: 0.0,
+            power_w: 0.0,
+            dp_v: 0.0,
+            dn_v: 0.0,
+            temp_c: 0.0,
+            raw_voltage: 0,
+            raw_current: 0,
+        }
+    }
+
+    fn push_energy(ps: &mut PlotState, timestamp_ms: u64, energy_wh: f64) {
+        // capacity_mah mirrors a distinct-but-synchronized series.
+        ps.push(&mk_sample(timestamp_ms), energy_wh, energy_wh * 2.0);
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn empty_state_returns_no_points() {
+        let ps = PlotState::new(16);
+        // Early return fires before the length debug_assert, in both LOD modes.
+        assert!(
+            ps.points_from_deque(&ps.energy_wh, 1000, None, true)
+                .points()
+                .is_empty()
+        );
+        assert!(
+            ps.points_from_deque(&ps.capacity_mah, 0, None, false)
+                .points()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn no_lod_returns_every_sample_in_order() {
+        let mut ps = PlotState::new(32);
+        for i in 0..8u64 {
+            push_energy(&mut ps, i * 1000, i as f64);
+        }
+        let pts = ps.points_from_deque(&ps.energy_wh, 1000, None, false);
+        let points = pts.points();
+        assert_eq!(points.len(), 8);
+        for (i, p) in points.iter().enumerate() {
+            assert_close(p.x, i as f64); // timestamp_ms / 1000
+            assert_close(p.y, i as f64); // energy value at the same index
+        }
+    }
+
+    #[test]
+    fn lod_decimates_to_min_max_per_bucket() {
+        let mut ps = PlotState::new(2048);
+        let n = 1000usize;
+        for i in 0..n {
+            push_energy(&mut ps, i as u64 * 10, i as f64);
+        }
+        // slice_len = 1000 > max_points = 10 -> buckets = 5; every bucket is
+        // monotonically increasing so min_idx < max_idx -> 2 points per bucket.
+        let pts = ps.points_from_deque(&ps.energy_wh, 10, None, true);
+        let points = pts.points();
+        assert_eq!(points.len(), 10);
+        // First emitted point is the min of bucket 0 (energy 0 at t = 0).
+        assert_close(points[0].x, 0.0);
+        assert_close(points[0].y, 0.0);
+        assert!(points.len() < n);
+    }
+
+    #[test]
+    fn all_nan_bucket_emits_gap_sentinel() {
+        let mut ps = PlotState::new(2048);
+        // First 200 samples carry real increasing energy; the next 200 are NaN.
+        for i in 0..200u64 {
+            push_energy(&mut ps, i * 10, i as f64);
+        }
+        for i in 200..400u64 {
+            push_energy(&mut ps, i * 10, f64::NAN);
+        }
+        // slice_len = 400 > max_points = 4 -> buckets = 2, bucket_size = 200.
+        // Bucket 0 (real) emits 2 points; bucket 1 (all NaN) emits 1 gap.
+        let pts = ps.points_from_deque(&ps.energy_wh, 4, None, true);
+        let points = pts.points();
+        assert_eq!(points.len(), 3);
+        assert!(points[0].y.is_finite());
+        assert!(points[1].y.is_finite());
+        assert!(points[2].y.is_nan(), "all-NaN bucket must emit a NaN gap");
+        // The sentinel keeps the timestamp of the bucket's first sample (index 200).
+        assert_close(points[2].x, 2.0);
+    }
+
+    #[test]
+    fn public_api_keeps_series_length_synced() {
+        // Every public mutator keeps energy_wh / capacity_mah index-synchronized with
+        // all_samples, so the debug_assert inside points_from_deque can never trip.
+        let mut ps = PlotState::new(5);
+        for i in 0..20u64 {
+            push_energy(&mut ps, i * 10, i as f64); // overflows capacity -> pop_front
+        }
+        assert_eq!(ps.energy_wh.len(), ps.all_samples.len());
+        assert_eq!(ps.capacity_mah.len(), ps.all_samples.len());
+
+        ps.set_capacity(3);
+        assert_eq!(ps.energy_wh.len(), ps.all_samples.len());
+        assert_eq!(ps.capacity_mah.len(), ps.all_samples.len());
+
+        ps.clear();
+        assert_eq!(ps.energy_wh.len(), ps.all_samples.len());
+        assert_eq!(ps.capacity_mah.len(), ps.all_samples.len());
+
+        for i in 0..7u64 {
+            ps.push_unlimited(&mk_sample(i * 10), i as f64, i as f64);
+        }
+        assert_eq!(ps.energy_wh.len(), ps.all_samples.len());
+        assert_eq!(ps.capacity_mah.len(), ps.all_samples.len());
+
+        // Exercising the path proves the assert holds for both public series.
+        assert_eq!(
+            ps.points_from_deque(&ps.energy_wh, 8, None, true)
+                .points()
+                .len(),
+            7
+        );
+        assert_eq!(
+            ps.points_from_deque(&ps.capacity_mah, 8, None, true)
+                .points()
+                .len(),
+            7
+        );
+    }
+
+    #[test]
+    #[ignore = "manual benchmark; run with --release -- --ignored --nocapture"]
+    fn bench_points_from_deque() {
+        let n = 200_000usize;
+        let mut ps = PlotState::new(n);
+        for i in 0..n {
+            push_energy(&mut ps, i as u64 * 10, i as f64 * 0.001);
+        }
+        let iters = 200usize;
+
+        // New path: read the VecDeque in place, no per-frame source allocation.
+        let start = std::time::Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            let pts = ps.points_from_deque(&ps.energy_wh, 4000, None, true);
+            sink += pts.points().len();
+        }
+        let new_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        // The work the old `points_from_iter` did every frame before any decimation:
+        // widen the whole f32 buffer into a fresh `Vec<f64>`. This is exactly what the
+        // new path removes; time it in isolation as the eliminated per-frame cost.
+        let start = std::time::Instant::now();
+        let mut alloc_sink = 0usize;
+        for _ in 0..iters {
+            // black_box keeps the allocation from being optimized away (this is the cost
+            // being measured) and prevents clippy folding it into a non-allocating count.
+            let widened = std::hint::black_box(
+                ps.energy_wh.iter().map(|&v| f64::from(v)).collect::<Vec<f64>>(),
+            );
+            alloc_sink += widened.len();
+        }
+        let widen_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        println!(
+            "points_from_deque: {n} samples x {iters} iters -> {new_ms:.4} ms/frame (sink={sink}); \
+             eliminated per-frame Vec<f64> widen: {widen_ms:.4} ms/frame (sink={alloc_sink})"
+        );
+        assert!(sink > 0 && alloc_sink > 0);
     }
 }
