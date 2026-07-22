@@ -7,6 +7,13 @@ use std::collections::VecDeque;
 
 const POINTS_PER_PIXEL: f32 = 8.0;
 
+/// `[start, end)` bounds of decimation bucket `b` of `buckets` total, covering local
+/// indices `[0, slice_len)`. Pure integer math (no float multiply/round per bucket).
+/// `(b + 1) <= buckets` guarantees `end <= slice_len`, so callers never need to clamp.
+fn bucket_bounds(b: usize, slice_len: usize, buckets: usize) -> (usize, usize) {
+    (b * slice_len / buckets, (b + 1) * slice_len / buckets)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PlotConfig {
     pub voltage: bool,
@@ -542,11 +549,9 @@ impl PlotState {
         // Min-max bucket decimation over the active slice.
         let buckets = (max_points / 2).max(1);
         let mut pts = Vec::with_capacity(buckets * 2);
-        let bucket_size = slice_len as f64 / buckets as f64;
 
         for b in 0..buckets {
-            let local_start = (b as f64 * bucket_size) as usize;
-            let local_end = (((b + 1) as f64 * bucket_size) as usize).min(slice_len);
+            let (local_start, local_end) = bucket_bounds(b, slice_len, buckets);
             if local_start >= local_end {
                 continue;
             }
@@ -642,11 +647,9 @@ impl PlotState {
 
         let buckets = (max_points / 2).max(1);
         let mut pts = Vec::with_capacity(buckets * 2);
-        let bucket_size = slice_len as f64 / buckets as f64;
 
         for b in 0..buckets {
-            let local_start = (b as f64 * bucket_size) as usize;
-            let local_end = (((b + 1) as f64 * bucket_size) as usize).min(slice_len);
+            let (local_start, local_end) = bucket_bounds(b, slice_len, buckets);
             if local_start >= local_end {
                 continue;
             }
@@ -997,5 +1000,93 @@ mod partition_point_tests {
         let (t, v) = state.value_from_vec(&vec, 3.5).unwrap();
         assert_eq!(t, 4.0);
         assert_eq!(v, 104.0);
+    }
+}
+
+#[cfg(test)]
+mod bucket_bounds_tests {
+    use super::bucket_bounds;
+
+    /// Cases spanning slice_len < buckets, exact division, and non-exact division.
+    fn cases() -> Vec<(usize, usize)> {
+        vec![
+            (0, 1),
+            (1, 1),
+            (10, 4),   // exact: slice_len % buckets == 0
+            (10, 3),   // inexact: remainder distributed across leading buckets
+            (3, 10),   // slice_len < buckets: most buckets are empty
+            (1, 10),
+            (1000, 7),
+            (2_000_003, 4096),
+        ]
+    }
+
+    #[test]
+    fn covers_exactly_zero_to_slice_len_with_no_overlap() {
+        for (slice_len, buckets) in cases() {
+            let mut expected_next_start = 0;
+            for b in 0..buckets {
+                let (start, end) = bucket_bounds(b, slice_len, buckets);
+                assert_eq!(
+                    start, expected_next_start,
+                    "bucket {b} start should immediately follow previous bucket's end \
+                     (slice_len={slice_len}, buckets={buckets})"
+                );
+                assert!(
+                    end <= slice_len,
+                    "bucket {b} end {end} exceeds slice_len {slice_len} (buckets={buckets})"
+                );
+                expected_next_start = end;
+            }
+            assert_eq!(
+                expected_next_start, slice_len,
+                "last bucket should end exactly at slice_len (slice_len={slice_len}, buckets={buckets})"
+            );
+        }
+    }
+
+    #[test]
+    fn bounds_are_monotonically_nondecreasing() {
+        for (slice_len, buckets) in cases() {
+            let mut prev_end = 0;
+            for b in 0..buckets {
+                let (start, end) = bucket_bounds(b, slice_len, buckets);
+                assert!(start <= end, "start {start} > end {end} for bucket {b}");
+                assert!(
+                    start >= prev_end,
+                    "bucket {b} start {start} regressed before previous end {prev_end}"
+                );
+                prev_end = end;
+            }
+        }
+    }
+
+    #[test]
+    fn empty_buckets_are_skippable_when_buckets_exceed_slice_len() {
+        // slice_len < buckets: some buckets must be empty (start == end), and the
+        // `if local_start >= local_end { continue; }` guard at the call sites relies on this.
+        let (slice_len, buckets) = (3, 10);
+        let empty_count = (0..buckets)
+            .filter(|&b| {
+                let (start, end) = bucket_bounds(b, slice_len, buckets);
+                start == end
+            })
+            .count();
+        assert_eq!(empty_count, buckets - slice_len);
+    }
+
+    #[test]
+    fn matches_previous_float_based_formula_when_inexact() {
+        // Confirms behavior is unchanged from the old `(b as f64 * bucket_size) as usize`
+        // formula for slice_len % buckets != 0, where float rounding could plausibly differ.
+        let (slice_len, buckets) = (17, 5);
+        let bucket_size = slice_len as f64 / buckets as f64;
+        for b in 0..buckets {
+            let old_start = (b as f64 * bucket_size) as usize;
+            let old_end = (((b + 1) as f64 * bucket_size) as usize).min(slice_len);
+            let (new_start, new_end) = bucket_bounds(b, slice_len, buckets);
+            assert_eq!(old_start, new_start, "start mismatch at bucket {b}");
+            assert_eq!(old_end, new_end, "end mismatch at bucket {b}");
+        }
     }
 }
