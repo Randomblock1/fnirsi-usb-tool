@@ -161,6 +161,9 @@ pub fn read_xlsx(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
         let mut rows = range.rows();
         let header = rows.next().context("Empty sheet")?;
 
+        // Resolve each column name to its index once, mirroring the Parquet
+        // reader's per-batch `column_index` resolution, instead of hashing
+        // the same 9 constant names on every row.
         let mut idx_map = std::collections::HashMap::new();
         for (i, cell) in header.iter().enumerate() {
             if let Some(s) = cell.get_string() {
@@ -168,25 +171,33 @@ pub fn read_xlsx(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
             }
         }
 
-        for row in rows {
-            let get_num = |name: &str| -> f64 {
-                idx_map
-                    .get(name)
-                    .and_then(|&idx| row.get(idx))
-                    .and_then(|c: &Data| c.get_float().or_else(|| c.get_int().map(|i| i as f64)))
-                    .unwrap_or(0.0)
-            };
+        let timestamp_idx = idx_map.get("timestamp_ms").copied();
+        let voltage_idx = idx_map.get("voltage_v").copied();
+        let current_idx = idx_map.get("current_a").copied();
+        let power_idx = idx_map.get("power_w").copied();
+        let dp_idx = idx_map.get("dp_v").copied();
+        let dn_idx = idx_map.get("dn_v").copied();
+        let temp_idx = idx_map.get("temp_c").copied();
+        let raw_voltage_idx = idx_map.get("raw_voltage").copied();
+        let raw_current_idx = idx_map.get("raw_current").copied();
 
+        let get_num = |row: &[Data], idx: Option<usize>| -> f64 {
+            idx.and_then(|idx| row.get(idx))
+                .and_then(|c: &Data| c.get_float().or_else(|| c.get_int().map(|i| i as f64)))
+                .unwrap_or(0.0)
+        };
+
+        for row in rows {
             samples.push(Sample {
-                timestamp_ms: get_num("timestamp_ms") as u64,
-                voltage_v: get_num("voltage_v") as f32,
-                current_a: get_num("current_a") as f32,
-                power_w: get_num("power_w") as f32,
-                dp_v: get_num("dp_v") as f32,
-                dn_v: get_num("dn_v") as f32,
-                temp_c: get_num("temp_c") as f32,
-                raw_voltage: get_num("raw_voltage") as u32,
-                raw_current: get_num("raw_current") as u32,
+                timestamp_ms: get_num(row, timestamp_idx) as u64,
+                voltage_v: get_num(row, voltage_idx) as f32,
+                current_a: get_num(row, current_idx) as f32,
+                power_w: get_num(row, power_idx) as f32,
+                dp_v: get_num(row, dp_idx) as f32,
+                dn_v: get_num(row, dn_idx) as f32,
+                temp_c: get_num(row, temp_idx) as f32,
+                raw_voltage: get_num(row, raw_voltage_idx) as u32,
+                raw_current: get_num(row, raw_current_idx) as u32,
             });
         }
     }
@@ -571,3 +582,138 @@ mod tests {
         assert_eq!(decoded[0].raw_current, 0);
     }
 }
+
+#[cfg(test)]
+mod xlsx_tests {
+    use super::{read_xlsx, write_xlsx};
+    use crate::sample::Sample;
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fnirsi-protocol-xlsx-{tag}-{unique}-{}.xlsx",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn full_usb_header_round_trips() {
+        let samples = [Sample {
+            timestamp_ms: 100,
+            voltage_v: 5.1,
+            current_a: 1.2,
+            power_w: 6.12,
+            dp_v: 0.8,
+            dn_v: 0.1,
+            temp_c: 31.5,
+            raw_voltage: 510_000,
+            raw_current: 120_000,
+        }];
+
+        let path = temp_path("full");
+        write_xlsx(&path, samples.iter(), true).unwrap();
+        let decoded = read_xlsx(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), 1);
+        let s = &decoded[0];
+        assert_eq!(s.timestamp_ms, 100);
+        assert!((s.voltage_v - 5.1).abs() < f32::EPSILON);
+        assert!((s.current_a - 1.2).abs() < f32::EPSILON);
+        assert!((s.power_w - 6.12).abs() < 1e-4);
+        assert!((s.dp_v - 0.8).abs() < f32::EPSILON);
+        assert!((s.dn_v - 0.1).abs() < f32::EPSILON);
+        assert!((s.temp_c - 31.5).abs() < f32::EPSILON);
+        assert_eq!(s.raw_voltage, 510_000);
+        assert_eq!(s.raw_current, 120_000);
+    }
+
+    /// BLE exports only carry the 4 common columns; the USB-only columns
+    /// must default to 0 rather than erroring or misreading adjacent cells.
+    #[test]
+    fn ble_header_subset_defaults_missing_columns() {
+        let samples = [Sample {
+            timestamp_ms: 200,
+            voltage_v: 9.0,
+            current_a: 2.0,
+            power_w: 18.0,
+            dp_v: 0.0,
+            dn_v: 0.0,
+            temp_c: 0.0,
+            raw_voltage: 0,
+            raw_current: 0,
+        }];
+
+        let path = temp_path("ble");
+        write_xlsx(&path, samples.iter(), false).unwrap();
+        let decoded = read_xlsx(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), 1);
+        let s = &decoded[0];
+        assert_eq!(s.timestamp_ms, 200);
+        assert!((s.voltage_v - 9.0).abs() < f32::EPSILON);
+        assert!((s.current_a - 2.0).abs() < f32::EPSILON);
+        assert!((s.power_w - 18.0).abs() < f32::EPSILON);
+        assert!(s.dp_v.abs() < f32::EPSILON);
+        assert!(s.dn_v.abs() < f32::EPSILON);
+        assert!(s.temp_c.abs() < f32::EPSILON);
+        assert_eq!(s.raw_voltage, 0);
+        assert_eq!(s.raw_current, 0);
+    }
+
+    /// Column order in the file must not matter: indices are resolved by
+    /// name once, then reused positionally for every row.
+    #[test]
+    fn reordered_columns_still_map_correctly() {
+        let path = temp_path("reordered");
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        let worksheet = workbook.add_worksheet();
+        worksheet
+            .write_row(
+                0,
+                0,
+                [
+                    "raw_current",
+                    "power_w",
+                    "timestamp_ms",
+                    "dn_v",
+                    "current_a",
+                    "voltage_v",
+                    "dp_v",
+                    "temp_c",
+                    "raw_voltage",
+                ],
+            )
+            .unwrap();
+        worksheet.write_number(1, 0, 130_000.0).unwrap(); // raw_current
+        worksheet.write_number(1, 1, 6.0).unwrap(); // power_w
+        worksheet.write_number(1, 2, 300.0).unwrap(); // timestamp_ms
+        worksheet.write_number(1, 3, 0.2).unwrap(); // dn_v
+        worksheet.write_number(1, 4, 1.5).unwrap(); // current_a
+        worksheet.write_number(1, 5, 4.0).unwrap(); // voltage_v
+        worksheet.write_number(1, 6, 0.9).unwrap(); // dp_v
+        worksheet.write_number(1, 7, 33.0).unwrap(); // temp_c
+        worksheet.write_number(1, 8, 520_000.0).unwrap(); // raw_voltage
+        workbook.save(&path).unwrap();
+
+        let decoded = read_xlsx(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), 1);
+        let s = &decoded[0];
+        assert_eq!(s.timestamp_ms, 300);
+        assert!((s.voltage_v - 4.0).abs() < f32::EPSILON);
+        assert!((s.current_a - 1.5).abs() < f32::EPSILON);
+        assert!((s.power_w - 6.0).abs() < f32::EPSILON);
+        assert!((s.dp_v - 0.9).abs() < f32::EPSILON);
+        assert!((s.dn_v - 0.2).abs() < f32::EPSILON);
+        assert!((s.temp_c - 33.0).abs() < f32::EPSILON);
+        assert_eq!(s.raw_voltage, 520_000);
+        assert_eq!(s.raw_current, 130_000);
+    }
+}
+
