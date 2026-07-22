@@ -55,12 +55,11 @@ pub fn write_jsonl<'a>(
     let file = std::fs::File::create(path)?;
     let mut wtr = std::io::BufWriter::new(file);
     for s in samples {
-        let line = if include_usb_fields {
-            serde_json::to_string(s)?
+        if include_usb_fields {
+            serde_json::to_writer(&mut wtr, s)?;
         } else {
-            serde_json::to_string(&BleSampleView::from(s))?
-        };
-        wtr.write_all(line.as_bytes())?;
+            serde_json::to_writer(&mut wtr, &BleSampleView::from(s))?;
+        }
         wtr.write_all(b"\n")?;
     }
     wtr.flush()?;
@@ -359,6 +358,97 @@ pub fn read_parquet(path: &std::path::Path) -> anyhow::Result<Vec<Sample>> {
     }
 
     Ok(samples)
+}
+
+#[cfg(test)]
+mod jsonl_tests {
+    use super::{read_jsonl, write_jsonl};
+    use crate::sample::Sample;
+
+    fn samples() -> [Sample; 2] {
+        [
+            Sample {
+                timestamp_ms: 100,
+                voltage_v: 5.1,
+                current_a: 1.2,
+                power_w: 6.12,
+                dp_v: 0.8,
+                dn_v: 0.1,
+                temp_c: 31.5,
+                raw_voltage: 510_000,
+                raw_current: 120_000,
+            },
+            Sample {
+                timestamp_ms: 110,
+                voltage_v: 9.0,
+                current_a: 2.0,
+                power_w: 18.0,
+                dp_v: 0.0,
+                dn_v: 0.0,
+                temp_c: 32.0,
+                raw_voltage: 900_000,
+                raw_current: 200_000,
+            },
+        ]
+    }
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fnirsi-protocol-{tag}-{unique}-{}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn jsonl_round_trip_preserves_samples_with_usb_fields() {
+        let samples = samples();
+        let path = temp_path("jsonl-usb");
+
+        write_jsonl(&path, samples.iter(), true).unwrap();
+        let decoded = read_jsonl(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), samples.len());
+        for (a, b) in decoded.iter().zip(samples.iter()) {
+            assert_eq!(a.timestamp_ms, b.timestamp_ms);
+            assert!((a.voltage_v - b.voltage_v).abs() < f32::EPSILON);
+            assert!((a.current_a - b.current_a).abs() < f32::EPSILON);
+            assert!((a.power_w - b.power_w).abs() < f32::EPSILON);
+            assert!((a.dp_v - b.dp_v).abs() < f32::EPSILON);
+            assert!((a.dn_v - b.dn_v).abs() < f32::EPSILON);
+            assert!((a.temp_c - b.temp_c).abs() < f32::EPSILON);
+            assert_eq!(a.raw_voltage, b.raw_voltage);
+            assert_eq!(a.raw_current, b.raw_current);
+        }
+    }
+
+    #[test]
+    fn jsonl_round_trip_preserves_samples_without_usb_fields() {
+        let samples = samples();
+        let path = temp_path("jsonl-ble");
+
+        write_jsonl(&path, samples.iter(), false).unwrap();
+        let decoded = read_jsonl(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(decoded.len(), samples.len());
+        for (a, b) in decoded.iter().zip(samples.iter()) {
+            assert_eq!(a.timestamp_ms, b.timestamp_ms);
+            assert!((a.voltage_v - b.voltage_v).abs() < f32::EPSILON);
+            assert!((a.current_a - b.current_a).abs() < f32::EPSILON);
+            assert!((a.power_w - b.power_w).abs() < f32::EPSILON);
+            // USB-only fields are omitted from BLE output, so they deserialize to defaults.
+            assert!(a.dp_v.abs() < f32::EPSILON);
+            assert!(a.dn_v.abs() < f32::EPSILON);
+            assert!(a.temp_c.abs() < f32::EPSILON);
+            assert_eq!(a.raw_voltage, 0);
+            assert_eq!(a.raw_current, 0);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "parquet"))]

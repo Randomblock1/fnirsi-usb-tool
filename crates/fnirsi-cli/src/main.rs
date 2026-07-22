@@ -348,12 +348,11 @@ impl LogOutput {
             }
             OutputFormat::Jsonl => {
                 if let Some(w) = &mut self.jsonl_writer {
-                    let line = if self.include_usb_fields {
-                        serde_json::to_string(s)?
+                    if self.include_usb_fields {
+                        serde_json::to_writer(&mut *w, s)?;
                     } else {
-                        serde_json::to_string(&csv_utils::BleSampleView::from(s))?
-                    };
-                    w.write_all(line.as_bytes())?;
+                        serde_json::to_writer(&mut *w, &csv_utils::BleSampleView::from(s))?;
+                    }
                     w.write_all(b"\n")?;
                 }
             }
