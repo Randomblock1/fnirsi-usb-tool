@@ -14,6 +14,20 @@ fn bucket_bounds(b: usize, slice_len: usize, buckets: usize) -> (usize, usize) {
     (b * slice_len / buckets, (b + 1) * slice_len / buckets)
 }
 
+/// Emit one decimated bucket for a single lane: both extremes at the bucket-center
+/// `x` (`lo` then `hi`), or a single NaN sentinel to open a gap when the fold never
+/// saw a finite value (an all-NaN bucket leaves `lo == +INFINITY`).
+///
+/// Equal-x points render as the vertical bar that min-max decimation already draws.
+fn emit_bucket(pts: &mut Vec<[f64; 2]>, x: f64, lo: f64, hi: f64) {
+    if lo.is_infinite() {
+        pts.push([x, f64::NAN]);
+    } else {
+        pts.push([x, lo]);
+        pts.push([x, hi]);
+    }
+}
+
 /// Hot-path subset of a [`Sample`] kept in the scanned plot buffer.
 ///
 /// Drops the export-only raw ADC registers (`raw_voltage` / `raw_current`),
@@ -299,48 +313,50 @@ impl PlotState {
                             let visible_x = lod_enabled
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
-                            plot_ui.line(
-                                Line::new(
-                                    "V",
-                                    self.points_from_samples(
-                                        |s| f64::from(s.voltage_v),
-                                        max_points,
-                                        visible_x,
-                                        lod_enabled,
-                                    ),
-                                )
-                                .color(egui::Color32::from_rgb(100, 180, 255))
-                                .width(1.5)
-                                .name("V"),
-                            );
                             if config.d_lines {
-                                plot_ui.line(
-                                    Line::new(
-                                        "D+",
-                                        self.points_from_samples(
-                                            |s| f64::from(s.dp_v),
-                                            max_points,
-                                            visible_x,
-                                            lod_enabled,
-                                        ),
-                                    )
-                                    .color(egui::Color32::from_rgb(100, 255, 100))
-                                    .width(1.5)
-                                    .name("D+"),
+                                // One fused decimation pass yields the V / D+ / D− lanes.
+                                let [v, dp, dn] = self.points_from_samples_multi(
+                                    |s| {
+                                        [
+                                            f64::from(s.voltage_v),
+                                            f64::from(s.dp_v),
+                                            f64::from(s.dn_v),
+                                        ]
+                                    },
+                                    max_points,
+                                    visible_x,
+                                    lod_enabled,
                                 );
                                 plot_ui.line(
-                                    Line::new(
-                                        "D-",
-                                        self.points_from_samples(
-                                            |s| f64::from(s.dn_v),
-                                            max_points,
-                                            visible_x,
-                                            lod_enabled,
-                                        ),
-                                    )
-                                    .color(egui::Color32::from_rgb(100, 255, 255))
-                                    .width(1.5)
-                                    .name("D−"),
+                                    Line::new("V", PlotPoints::new(v))
+                                        .color(egui::Color32::from_rgb(100, 180, 255))
+                                        .width(1.5)
+                                        .name("V"),
+                                );
+                                plot_ui.line(
+                                    Line::new("D+", PlotPoints::new(dp))
+                                        .color(egui::Color32::from_rgb(100, 255, 100))
+                                        .width(1.5)
+                                        .name("D+"),
+                                );
+                                plot_ui.line(
+                                    Line::new("D-", PlotPoints::new(dn))
+                                        .color(egui::Color32::from_rgb(100, 255, 255))
+                                        .width(1.5)
+                                        .name("D−"),
+                                );
+                            } else {
+                                let [v] = self.points_from_samples_multi(
+                                    |s| [f64::from(s.voltage_v)],
+                                    max_points,
+                                    visible_x,
+                                    lod_enabled,
+                                );
+                                plot_ui.line(
+                                    Line::new("V", PlotPoints::new(v))
+                                        .color(egui::Color32::from_rgb(100, 180, 255))
+                                        .width(1.5)
+                                        .name("V"),
                                 );
                             }
                         },
@@ -365,19 +381,17 @@ impl PlotState {
                             let visible_x = lod_enabled
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
+                            let [a] = self.points_from_samples_multi(
+                                |s| [f64::from(s.current_a)],
+                                max_points,
+                                visible_x,
+                                lod_enabled,
+                            );
                             plot_ui.line(
-                                Line::new(
-                                    "A",
-                                    self.points_from_samples(
-                                        |s| f64::from(s.current_a),
-                                        max_points,
-                                        visible_x,
-                                        lod_enabled,
-                                    ),
-                                )
-                                .color(egui::Color32::from_rgb(255, 100, 100))
-                                .width(1.5)
-                                .name("A"),
+                                Line::new("A", PlotPoints::new(a))
+                                    .color(egui::Color32::from_rgb(255, 100, 100))
+                                    .width(1.5)
+                                    .name("A"),
                             );
                         },
                         self.latest_current,
@@ -401,19 +415,17 @@ impl PlotState {
                             let visible_x = lod_enabled
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
+                            let [w] = self.points_from_samples_multi(
+                                |s| [f64::from(s.power_w)],
+                                max_points,
+                                visible_x,
+                                lod_enabled,
+                            );
                             plot_ui.line(
-                                Line::new(
-                                    "W",
-                                    self.points_from_samples(
-                                        |s| f64::from(s.power_w),
-                                        max_points,
-                                        visible_x,
-                                        lod_enabled,
-                                    ),
-                                )
-                                .color(egui::Color32::from_rgb(255, 180, 80))
-                                .width(1.5)
-                                .name("W"),
+                                Line::new("W", PlotPoints::new(w))
+                                    .color(egui::Color32::from_rgb(255, 180, 80))
+                                    .width(1.5)
+                                    .name("W"),
                             );
                         },
                         self.latest_power,
@@ -437,19 +449,17 @@ impl PlotState {
                             let visible_x = lod_enabled
                                 .then(|| Self::visible_x_bounds(plot_ui))
                                 .flatten();
+                            let [c] = self.points_from_samples_multi(
+                                |s| [f64::from(s.temp_c)],
+                                max_points,
+                                visible_x,
+                                lod_enabled,
+                            );
                             plot_ui.line(
-                                Line::new(
-                                    "C",
-                                    self.points_from_samples(
-                                        |s| f64::from(s.temp_c),
-                                        max_points,
-                                        visible_x,
-                                        lod_enabled,
-                                    ),
-                                )
-                                .color(egui::Color32::from_rgb(100, 220, 100))
-                                .width(1.5)
-                                .name("°C"),
+                                Line::new("C", PlotPoints::new(c))
+                                    .color(egui::Color32::from_rgb(100, 220, 100))
+                                    .width(1.5)
+                                    .name("°C"),
                             );
                         },
                         self.latest_temp,
@@ -587,42 +597,71 @@ impl PlotState {
         (start, end)
     }
 
-    /// Build plot points by extracting a value from each sample, with zoom-aware min-max decimation.
-    fn points_from_samples(
+    /// Timestamp (seconds) of the bucket's middle sample — the x at which
+    /// [`emit_bucket`] places the bucket's extremes.
+    fn bucket_center_x(&self, abs_start: usize, abs_end: usize) -> f64 {
+        self.all_samples[usize::midpoint(abs_start, abs_end)].timestamp_ms as f64 / 1000.0
+    }
+
+    /// Build one plot-point series per lane in a single fused pass over the sample buffer.
+    ///
+    /// `extract` maps each sample to `N` independent lane values (e.g. voltage / D+ / D−),
+    /// so the zoom-aware min-max decimation runs once — one [`Self::visible_range`] call and
+    /// one walk of the active slice, reading each [`PlotSample`] once for all lanes. Each
+    /// lane folds only a `lo`/`hi` pair via `f64::min`/`f64::max`, which ignore NaN operands,
+    /// so there is no per-sample NaN branch and no argmin/argmax index bookkeeping — the
+    /// accumulators stay independent, letting the compiler unroll the fold. An all-NaN
+    /// bucket leaves `lo == +INFINITY`, which [`emit_bucket`] turns into a gap sentinel.
+    ///
+    /// Both extremes are emitted at the bucket-center timestamp (`lo` then `hi`) rather
+    /// than at their true sample positions. This moves each extreme by at most half a
+    /// bucket, which at `POINTS_PER_PIXEL = 8` (2 points per bucket) is ~1/8 px — visually
+    /// indistinguishable. The non-LOD path still emits every sample at its true timestamp.
+    fn points_from_samples_multi<const N: usize>(
         &self,
-        extract: impl Fn(&PlotSample) -> f64,
+        extract: impl Fn(&PlotSample) -> [f64; N],
         max_points: usize,
         visible_x: Option<(f64, f64)>,
         lod_enabled: bool,
-    ) -> PlotPoints<'static> {
+    ) -> [Vec<[f64; 2]>; N] {
         let count = self.all_samples.len();
         if count == 0 {
-            return PlotPoints::new(vec![]);
+            return std::array::from_fn(|_| Vec::new());
         }
 
         if !lod_enabled {
-            let mut pts = Vec::with_capacity(count);
+            let mut pts: [Vec<[f64; 2]>; N] = std::array::from_fn(|_| Vec::with_capacity(count));
             for s in &self.all_samples {
-                pts.push([s.timestamp_ms as f64 / 1000.0, extract(s)]);
+                let t = s.timestamp_ms as f64 / 1000.0;
+                let vals = extract(s);
+                for (dst, v) in pts.iter_mut().zip(vals) {
+                    dst.push([t, v]);
+                }
             }
-            return PlotPoints::new(pts);
+            return pts;
         }
 
         let (start_idx, end_idx) = self.visible_range(visible_x);
         let slice_len = end_idx - start_idx;
 
         if max_points == 0 || slice_len <= max_points {
-            let mut pts = Vec::with_capacity(slice_len);
+            let mut pts: [Vec<[f64; 2]>; N] =
+                std::array::from_fn(|_| Vec::with_capacity(slice_len));
             for i in start_idx..end_idx {
                 let s = &self.all_samples[i];
-                pts.push([s.timestamp_ms as f64 / 1000.0, extract(s)]);
+                let t = s.timestamp_ms as f64 / 1000.0;
+                let vals = extract(s);
+                for (dst, v) in pts.iter_mut().zip(vals) {
+                    dst.push([t, v]);
+                }
             }
-            return PlotPoints::new(pts);
+            return pts;
         }
 
-        // Min-max bucket decimation over the active slice.
+        // Min-max bucket decimation over the active slice, fused across all N lanes.
         let buckets = (max_points / 2).max(1);
-        let mut pts = Vec::with_capacity(buckets * 2);
+        let mut pts: [Vec<[f64; 2]>; N] =
+            std::array::from_fn(|_| Vec::with_capacity(buckets * 2));
 
         for b in 0..buckets {
             let (local_start, local_end) = bucket_bounds(b, slice_len, buckets);
@@ -632,47 +671,23 @@ impl PlotState {
             let abs_start = start_idx + local_start;
             let abs_end = start_idx + local_end;
 
-            let mut min_val = f64::INFINITY;
-            let mut max_val = f64::NEG_INFINITY;
-            let mut min_idx = abs_start;
-            let mut max_idx = abs_start;
-
+            let mut lo = [f64::INFINITY; N];
+            let mut hi = [f64::NEG_INFINITY; N];
             for i in abs_start..abs_end {
-                let s = &self.all_samples[i];
-                let v = extract(s);
-                if v.is_nan() {
-                    continue;
-                }
-                if v < min_val {
-                    min_val = v;
-                    min_idx = i;
-                }
-                if v > max_val {
-                    max_val = v;
-                    max_idx = i;
+                let vals = extract(&self.all_samples[i]);
+                for ((l, h), v) in lo.iter_mut().zip(hi.iter_mut()).zip(vals) {
+                    *l = l.min(v);
+                    *h = h.max(v);
                 }
             }
 
-            if min_val.is_infinite() {
-                // All NaN bucket — emit a NaN sentinel to create a gap.
-                let s = &self.all_samples[abs_start];
-                pts.push([s.timestamp_ms as f64 / 1000.0, f64::NAN]);
-            } else if min_idx <= max_idx {
-                let s_min = &self.all_samples[min_idx];
-                let s_max = &self.all_samples[max_idx];
-                pts.push([s_min.timestamp_ms as f64 / 1000.0, min_val]);
-                if min_idx != max_idx {
-                    pts.push([s_max.timestamp_ms as f64 / 1000.0, max_val]);
-                }
-            } else {
-                let s_max = &self.all_samples[max_idx];
-                let s_min = &self.all_samples[min_idx];
-                pts.push([s_max.timestamp_ms as f64 / 1000.0, max_val]);
-                pts.push([s_min.timestamp_ms as f64 / 1000.0, min_val]);
+            let x = self.bucket_center_x(abs_start, abs_end);
+            for (dst, (l, h)) in pts.iter_mut().zip(lo.into_iter().zip(hi)) {
+                emit_bucket(dst, x, l, h);
             }
         }
 
-        PlotPoints::new(pts)
+        pts
     }
 
     /// Build plot points from an index-synchronized `VecDeque<f32>` (e.g. energy/capacity),
@@ -682,6 +697,10 @@ impl PlotState {
     /// pairs with `all_samples[i].timestamp_ms`. Sub-ranges are taken with `VecDeque::range`,
     /// which positions in O(1) via the ring buffer — no per-bucket prefix walk — so each bucket
     /// costs O(bucket) rather than the O(offset) a re-skipping iterator would.
+    ///
+    /// Decimation uses the same branchless `lo`/`hi` fold and bucket-center [`emit_bucket`]
+    /// emission as [`Self::points_from_samples_multi`], so energy/capacity decimate
+    /// identically to the sample-backed lines.
     fn points_from_deque(
         &self,
         values: &VecDeque<f32>,
@@ -728,44 +747,15 @@ impl PlotState {
             let abs_start = start_idx + local_start;
             let abs_end = start_idx + local_end;
 
-            let mut min_val = f64::INFINITY;
-            let mut max_val = f64::NEG_INFINITY;
-            let mut min_idx = abs_start;
-            let mut max_idx = abs_start;
-
-            for (offset, &raw) in values.range(abs_start..abs_end).enumerate() {
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for &raw in values.range(abs_start..abs_end) {
                 let v = f64::from(raw);
-                if v.is_nan() {
-                    continue;
-                }
-                let i = abs_start + offset;
-                if v < min_val {
-                    min_val = v;
-                    min_idx = i;
-                }
-                if v > max_val {
-                    max_val = v;
-                    max_idx = i;
-                }
+                lo = lo.min(v);
+                hi = hi.max(v);
             }
 
-            if min_val.is_infinite() {
-                // All NaN bucket — emit a NaN sentinel to create a gap.
-                let s = &self.all_samples[abs_start];
-                pts.push([s.timestamp_ms as f64 / 1000.0, f64::NAN]);
-            } else if min_idx <= max_idx {
-                let s_min = &self.all_samples[min_idx];
-                let s_max = &self.all_samples[max_idx];
-                pts.push([s_min.timestamp_ms as f64 / 1000.0, min_val]);
-                if min_idx != max_idx {
-                    pts.push([s_max.timestamp_ms as f64 / 1000.0, max_val]);
-                }
-            } else {
-                let s_max = &self.all_samples[max_idx];
-                let s_min = &self.all_samples[min_idx];
-                pts.push([s_max.timestamp_ms as f64 / 1000.0, max_val]);
-                pts.push([s_min.timestamp_ms as f64 / 1000.0, min_val]);
-            }
+            emit_bucket(&mut pts, self.bucket_center_x(abs_start, abs_end), lo, hi);
         }
 
         PlotPoints::new(pts)
@@ -1230,14 +1220,17 @@ mod points_from_deque_tests {
         for i in 0..n {
             push_energy(&mut ps, i as u64 * 10, i as f64);
         }
-        // slice_len = 1000 > max_points = 10 -> buckets = 5; every bucket is
-        // monotonically increasing so min_idx < max_idx -> 2 points per bucket.
+        // slice_len = 1000 > max_points = 10 -> buckets = 5 of 200 samples; every
+        // bucket emits its lo/hi pair at the bucket-center timestamp.
         let pts = ps.points_from_deque(&ps.energy_wh, 10, None, true);
         let points = pts.points();
         assert_eq!(points.len(), 10);
-        // First emitted point is the min of bucket 0 (energy 0 at t = 0).
-        assert_close(points[0].x, 0.0);
+        // Bucket 0 covers indices 0..200 (min 0, max 199); both extremes land at the
+        // center sample (index 100, t = 1.0 s), lo first.
+        assert_close(points[0].x, 1.0);
         assert_close(points[0].y, 0.0);
+        assert_close(points[1].x, 1.0);
+        assert_close(points[1].y, 199.0);
         assert!(points.len() < n);
     }
 
@@ -1259,8 +1252,8 @@ mod points_from_deque_tests {
         assert!(points[0].y.is_finite());
         assert!(points[1].y.is_finite());
         assert!(points[2].y.is_nan(), "all-NaN bucket must emit a NaN gap");
-        // The sentinel keeps the timestamp of the bucket's first sample (index 200).
-        assert_close(points[2].x, 2.0);
+        // The sentinel sits at the bucket-center sample (index 300 of 200..400).
+        assert_close(points[2].x, 3.0);
     }
 
     #[test]
@@ -1444,5 +1437,468 @@ mod raw_adc_split_tests {
         assert!(state.is_empty());
         assert!(state.raw_adc.is_empty());
         assert!(state.export_samples().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fused_decimation_tests {
+    use super::*;
+
+    fn mk(ts_ms: u64, v: f32, dp: f32, dn: f32) -> Sample {
+        Sample {
+            timestamp_ms: ts_ms,
+            voltage_v: v,
+            current_a: 0.0,
+            power_w: 0.0,
+            dp_v: dp,
+            dn_v: dn,
+            temp_c: 0.0,
+            raw_voltage: 0,
+            raw_current: 0,
+        }
+    }
+
+    fn state_from(samples: &[Sample]) -> PlotState {
+        let mut st = PlotState::new(samples.len().max(1));
+        for s in samples {
+            st.push_unlimited(s, 0.0, 0.0);
+        }
+        st
+    }
+
+    /// Timestamp (seconds) exactly as the decimator computes it from milliseconds.
+    fn t(ms: u64) -> f64 {
+        ms as f64 / 1000.0
+    }
+
+    /// Bitwise coordinate equality that also treats NaN as equal to NaN.
+    fn coord_eq(x: f64, y: f64) -> bool {
+        if x.is_nan() || y.is_nan() {
+            x.is_nan() && y.is_nan()
+        } else {
+            x.to_bits() == y.to_bits()
+        }
+    }
+
+    fn points_eq(a: &[[f64; 2]], b: &[[f64; 2]]) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(p, q)| coord_eq(p[0], q[0]) && coord_eq(p[1], q[1]))
+    }
+
+    #[test]
+    fn n1_ramp_emits_extremes_at_bucket_centers() {
+        // 10-sample ramp, max_points = 4 → 2 buckets of 5 samples each.
+        let samples: Vec<Sample> = (0..10).map(|i| mk(i, i as f32, 0.0, 0.0)).collect();
+        let st = state_from(&samples);
+
+        let [lane] = st.points_from_samples_multi(|s| [f64::from(s.voltage_v)], 4, None, true);
+
+        // Bucket 0 (idx 0..5): lo 0 / hi 4 at center idx 2. Bucket 1 (idx 5..10):
+        // lo 5 / hi 9 at center idx 7.
+        let expected = vec![[t(2), 0.0], [t(2), 4.0], [t(7), 5.0], [t(7), 9.0]];
+        assert!(points_eq(&lane, &expected), "got {lane:?}");
+    }
+
+    #[test]
+    fn n3_lanes_fold_independently_at_shared_bucket_center() {
+        // Single bucket (max_points = 2) over 5 samples. Each lane's extremes come from
+        // different sample indices, yet all land at the shared bucket-center x (idx 2),
+        // lo before hi regardless of which sample produced which extreme.
+        let v = [0.0, 1.0, 2.0, 3.0, 4.0]; // ascending: min@0, max@4
+        let dp = [7.0, 7.0, 7.0, 7.0, 7.0]; // flat: lo == hi
+        let dn = [4.0, 3.0, 2.0, 1.0, 0.0]; // descending: min@4, max@0
+        let samples: Vec<Sample> = (0..5)
+            .map(|i| mk(i, v[i as usize], dp[i as usize], dn[i as usize]))
+            .collect();
+        let st = state_from(&samples);
+
+        let [lv, ldp, ldn] = st.points_from_samples_multi(
+            |s| [f64::from(s.voltage_v), f64::from(s.dp_v), f64::from(s.dn_v)],
+            2,
+            None,
+            true,
+        );
+
+        assert!(points_eq(&lv, &[[t(2), 0.0], [t(2), 4.0]]), "v: {lv:?}");
+        assert!(points_eq(&ldp, &[[t(2), 7.0], [t(2), 7.0]]), "dp: {ldp:?}");
+        assert!(points_eq(&ldn, &[[t(2), 0.0], [t(2), 4.0]]), "dn: {ldn:?}");
+    }
+
+    #[test]
+    fn nan_operands_ignored_and_all_nan_bucket_emits_gap_sentinel() {
+        // 6 samples, max_points = 4 → 2 buckets of 3. Bucket 0 has a leading NaN that the
+        // min/max fold must ignore (without an explicit is_nan branch); bucket 1 is all
+        // NaN → one gap sentinel at its bucket-center timestamp.
+        let vals = [f32::NAN, 1.0, 2.0, f32::NAN, f32::NAN, f32::NAN];
+        let samples: Vec<Sample> = (0..6).map(|i| mk(i, vals[i as usize], 0.0, 0.0)).collect();
+        let st = state_from(&samples);
+
+        let [lane] = st.points_from_samples_multi(|s| [f64::from(s.voltage_v)], 4, None, true);
+
+        assert_eq!(lane.len(), 3);
+        // Bucket 0 (idx 0..3, center idx 1): NaN ignored → lo 1 / hi 2.
+        assert!(points_eq(&lane[..2], &[[t(1), 1.0], [t(1), 2.0]]), "{lane:?}");
+        // Bucket 1 (idx 3..6, center idx 4): all NaN → sentinel with NaN y.
+        assert!(coord_eq(lane[2][0], t(4)), "{lane:?}");
+        assert!(lane[2][1].is_nan(), "{lane:?}");
+    }
+
+    #[test]
+    fn fused_matches_separate() {
+        // The fused N=3 pass must produce, lane for lane, exactly what three N=1 passes
+        // produce, across the non-LOD path, the pass-through path, and several
+        // decimation ratios.
+        let n = 1500usize;
+        let samples: Vec<Sample> = (0..n)
+            .map(|i| {
+                let v = if i % 71 == 0 { f32::NAN } else { (i % 97) as f32 };
+                let dp = if i % 50 == 0 { f32::NAN } else { (i % 53) as f32 };
+                let dn = (i % 31) as f32;
+                mk(i as u64, v, dp, dn)
+            })
+            .collect();
+        let st = state_from(&samples);
+
+        for &mp in &[0usize, 8, 64, 500, 4000] {
+            for &lod in &[true, false] {
+                let [fv, fdp, fdn] = st.points_from_samples_multi(
+                    |s| [f64::from(s.voltage_v), f64::from(s.dp_v), f64::from(s.dn_v)],
+                    mp,
+                    None,
+                    lod,
+                );
+                let [sv] =
+                    st.points_from_samples_multi(|s| [f64::from(s.voltage_v)], mp, None, lod);
+                let [sdp] = st.points_from_samples_multi(|s| [f64::from(s.dp_v)], mp, None, lod);
+                let [sdn] = st.points_from_samples_multi(|s| [f64::from(s.dn_v)], mp, None, lod);
+                assert!(points_eq(&fv, &sv), "voltage mismatch mp={mp} lod={lod}");
+                assert!(points_eq(&fdp, &sdp), "dp mismatch mp={mp} lod={lod}");
+                assert!(points_eq(&fdn, &sdn), "dn mismatch mp={mp} lod={lod}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with: cargo test --release -- --ignored --nocapture"]
+    fn timing_fused_vs_separate() {
+        let n = 200_000usize;
+        let samples: Vec<Sample> = (0..n)
+            .map(|i| mk(i as u64, (i % 97) as f32, (i % 53) as f32, (i % 31) as f32))
+            .collect();
+        let st = state_from(&samples);
+        let max_points = 4000usize;
+        let iters = 50u32;
+
+        let sep_start = std::time::Instant::now();
+        for _ in 0..iters {
+            let a =
+                st.points_from_samples_multi(|s| [f64::from(s.voltage_v)], max_points, None, true);
+            let b = st.points_from_samples_multi(|s| [f64::from(s.dp_v)], max_points, None, true);
+            let c = st.points_from_samples_multi(|s| [f64::from(s.dn_v)], max_points, None, true);
+            std::hint::black_box((a, b, c));
+        }
+        let sep = sep_start.elapsed();
+
+        let fused_start = std::time::Instant::now();
+        for _ in 0..iters {
+            let lanes = st.points_from_samples_multi(
+                |s| [f64::from(s.voltage_v), f64::from(s.dp_v), f64::from(s.dn_v)],
+                max_points,
+                None,
+                true,
+            );
+            std::hint::black_box(lanes);
+        }
+        let fused = fused_start.elapsed();
+
+        eprintln!(
+            "3x N=1: {sep:?} ({:?}/iter)  vs  1x N=3: {fused:?} ({:?}/iter)  [{n} samples, {iters} iters]",
+            sep / iters,
+            fused / iters,
+        );
+    }
+}
+
+#[cfg(test)]
+mod decimation_parity_tests {
+    use super::*;
+
+    fn build_state(values: &[f32]) -> PlotState {
+        let mut st = PlotState::new(values.len().max(1));
+        for (i, &v) in values.iter().enumerate() {
+            let s = Sample {
+                timestamp_ms: i as u64 * 10,
+                voltage_v: v,
+                current_a: 0.0,
+                power_w: 0.0,
+                dp_v: 0.0,
+                dn_v: 0.0,
+                temp_c: 0.0,
+                raw_voltage: 0,
+                raw_current: 0,
+            };
+            st.push_unlimited(&s, 0.0, 0.0);
+        }
+        st
+    }
+
+    /// One bucket's outcome from the pre-change loop: extreme values plus the true
+    /// timestamps the old code emitted them at.
+    struct OldBucket {
+        abs_start: usize,
+        abs_end: usize,
+        min_val: f64, // +INFINITY when the bucket is all-NaN
+        max_val: f64,
+        min_x: f64,
+        max_x: f64,
+    }
+
+    /// ORIGINAL per-lane bucket loop (argmin/argmax, extremes at true timestamps),
+    /// preserved so the parity and timing tests have a reference implementation.
+    fn old_decimate(
+        st: &PlotState,
+        extract: impl Fn(&PlotSample) -> f64,
+        start_idx: usize,
+        end_idx: usize,
+        buckets: usize,
+    ) -> Vec<OldBucket> {
+        let slice_len = end_idx - start_idx;
+        let mut out = Vec::with_capacity(buckets);
+        for b in 0..buckets {
+            let (local_start, local_end) = bucket_bounds(b, slice_len, buckets);
+            if local_start >= local_end {
+                continue;
+            }
+            let abs_start = start_idx + local_start;
+            let abs_end = start_idx + local_end;
+
+            let mut min_val = f64::INFINITY;
+            let mut max_val = f64::NEG_INFINITY;
+            let mut min_idx = abs_start;
+            let mut max_idx = abs_start;
+            for i in abs_start..abs_end {
+                let v = extract(&st.all_samples[i]);
+                if v.is_nan() {
+                    continue;
+                }
+                if v < min_val {
+                    min_val = v;
+                    min_idx = i;
+                }
+                if v > max_val {
+                    max_val = v;
+                    max_idx = i;
+                }
+            }
+
+            let ts = |i: usize| st.all_samples[i].timestamp_ms as f64 / 1000.0;
+            out.push(OldBucket {
+                abs_start,
+                abs_end,
+                min_val,
+                max_val,
+                min_x: ts(min_idx),
+                max_x: ts(max_idx),
+            });
+        }
+        out
+    }
+
+    /// Seeded LCG (no external rand crate) producing values in `[0, 1)`.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_u64(&mut self) -> u64 {
+            // Numerical Recipes constants.
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+        fn next_unit(&mut self) -> f64 {
+            // Top 53 bits → uniform f64 in [0, 1).
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    fn noisy_values(n: usize, seed: u64, nan_every: usize) -> Vec<f32> {
+        let mut rng = Lcg(seed);
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            // Slow drift + high-frequency noise, occasional NaN runs. All finite values
+            // stay positive, so the min/max fold never sees a ±0.0 ambiguity.
+            if nan_every != 0 && (i / nan_every).is_multiple_of(17) {
+                out.push(f32::NAN);
+                continue;
+            }
+            let drift = (i as f64 / 500.0).sin().mul_add(2.0, 5.0);
+            let noise = (rng.next_unit() - 0.5) * 0.8;
+            out.push((drift + noise) as f32);
+        }
+        out
+    }
+
+    #[test]
+    fn bucket_center_fold_matches_argminmax_extremes() {
+        // Include constant runs and NaN runs alongside the noisy data.
+        let mut values = noisy_values(4000, 0x1234_5678, 250);
+        for v in &mut values[500..600] {
+            *v = 3.3; // constant bucket region: old code emitted a single point here
+        }
+        for v in &mut values[700..720] {
+            *v = f32::NAN; // all-NaN bucket region
+        }
+        let st = build_state(&values);
+        let extract = |s: &PlotSample| f64::from(s.voltage_v);
+        let ts = |idx: usize| st.all_samples[idx].timestamp_ms as f64 / 1000.0;
+
+        // Full view plus zoomed windows; visible_range narrows exactly as production does.
+        for &visible_x in &[None, Some((5.0, 12.0)), Some((0.9, 7.31))] {
+            let (start_idx, end_idx) = st.visible_range(visible_x);
+            for &max_points in &[64usize, 512, 3998] {
+                if end_idx - start_idx <= max_points {
+                    continue; // pass-through: no decimation to compare
+                }
+                let buckets = (max_points / 2).max(1);
+                let old = old_decimate(&st, extract, start_idx, end_idx, buckets);
+                let [new] = st.points_from_samples_multi(
+                    |s| [f64::from(s.voltage_v)],
+                    max_points,
+                    visible_x,
+                    true,
+                );
+
+                let mut i = 0usize;
+                for ob in &old {
+                    // Half the bucket's width in seconds (10 ms sample period), plus a
+                    // hair of float slack for the exactly-half-a-bucket edge case.
+                    let tol = (ob.abs_end - ob.abs_start) as f64 * 0.010 / 2.0 + 1e-9;
+                    if ob.min_val.is_infinite() {
+                        // All-NaN bucket → a single gap sentinel in both implementations.
+                        let [x, y] = new[i];
+                        assert!(y.is_nan(), "expected NaN sentinel, got {y}");
+                        assert!(
+                            (x - ts(ob.abs_start)).abs() <= tol,
+                            "sentinel moved more than half a bucket"
+                        );
+                        i += 1;
+                    } else {
+                        let [x_lo, y_lo] = new[i];
+                        let [x_hi, y_hi] = new[i + 1];
+                        // Per-bucket {min, max} value multiset is identical, bit for bit:
+                        // both folds reduce the same finite f64 set and the fixture has
+                        // no ±0.0 ambiguity.
+                        assert_eq!(y_lo.to_bits(), ob.min_val.to_bits(), "min differs");
+                        assert_eq!(y_hi.to_bits(), ob.max_val.to_bits(), "max differs");
+                        // Both extremes share the bucket-center x, and each sits within
+                        // half a bucket of where the old code emitted it.
+                        assert_eq!(x_lo.to_bits(), x_hi.to_bits());
+                        assert!(
+                            (x_lo - ob.min_x).abs() <= tol && (x_hi - ob.max_x).abs() <= tol,
+                            "extreme moved more than half a bucket"
+                        );
+                        i += 2;
+                    }
+                }
+                assert_eq!(i, new.len(), "point count mismatch");
+            }
+        }
+    }
+
+    /// Flat emitter mirroring the OLD production loop end to end (argmin/argmax at true
+    /// timestamps), used only by the ignored timing comparison below.
+    fn old_flat(
+        st: &PlotState,
+        extract: impl Fn(&PlotSample) -> f64,
+        slice_len: usize,
+        buckets: usize,
+    ) -> Vec<[f64; 2]> {
+        let mut pts = Vec::with_capacity(buckets * 2);
+        for b in 0..buckets {
+            let (abs_start, abs_end) = bucket_bounds(b, slice_len, buckets);
+            if abs_start >= abs_end {
+                continue;
+            }
+            let mut min_val = f64::INFINITY;
+            let mut max_val = f64::NEG_INFINITY;
+            let mut min_idx = abs_start;
+            let mut max_idx = abs_start;
+            for i in abs_start..abs_end {
+                let v = extract(&st.all_samples[i]);
+                if v.is_nan() {
+                    continue;
+                }
+                if v < min_val {
+                    min_val = v;
+                    min_idx = i;
+                }
+                if v > max_val {
+                    max_val = v;
+                    max_idx = i;
+                }
+            }
+            if min_val.is_infinite() {
+                pts.push([
+                    st.all_samples[abs_start].timestamp_ms as f64 / 1000.0,
+                    f64::NAN,
+                ]);
+            } else if min_idx <= max_idx {
+                pts.push([st.all_samples[min_idx].timestamp_ms as f64 / 1000.0, min_val]);
+                if min_idx != max_idx {
+                    pts.push([st.all_samples[max_idx].timestamp_ms as f64 / 1000.0, max_val]);
+                }
+            } else {
+                pts.push([st.all_samples[max_idx].timestamp_ms as f64 / 1000.0, max_val]);
+                pts.push([st.all_samples[min_idx].timestamp_ms as f64 / 1000.0, min_val]);
+            }
+        }
+        pts
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with: cargo test --release -- --ignored --nocapture"]
+    fn timing_old_vs_new() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let n = 500_000;
+        let values = noisy_values(n, 0xDEAD_BEEF, 5000);
+        let st = build_state(&values);
+        let extract = |s: &PlotSample| f64::from(s.voltage_v);
+        // Realistic full-view decimation: ~2000 buckets over 500k samples.
+        let buckets = 2000usize;
+        let max_points = buckets * 2;
+        let iters: u128 = 200;
+
+        // Warm up + defeat DCE.
+        black_box(old_flat(&st, extract, n, buckets).len());
+        black_box(st.points_from_samples_multi(|s| [f64::from(s.voltage_v)], max_points, None, true));
+
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            black_box(old_flat(&st, black_box(extract), n, buckets));
+        }
+        let old_ns = t0.elapsed().as_nanos() / iters;
+
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            black_box(st.points_from_samples_multi(
+                |s| [f64::from(s.voltage_v)],
+                black_box(max_points),
+                None,
+                true,
+            ));
+        }
+        let new_ns = t1.elapsed().as_nanos() / iters;
+
+        let speedup = old_ns as f64 / new_ns as f64;
+        println!(
+            "min-max decimation over {n} samples, {buckets} buckets, {iters} iters:\n  \
+             old (argmin/argmax, true x):     {old_ns:>8} ns/call\n  \
+             new (branchless bucket-center):  {new_ns:>8} ns/call\n  \
+             speedup: {speedup:.3}x"
+        );
     }
 }
