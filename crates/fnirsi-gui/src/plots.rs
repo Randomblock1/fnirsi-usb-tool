@@ -1983,3 +1983,105 @@ mod pyramid_integration_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::suboptimal_flops,
+    clippy::float_cmp
+)]
+mod ab_bench {
+    use super::*;
+    use fnirsi_protocol::Sample;
+
+    fn lcg_next(state: &mut u64) -> f32 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((*state >> 33) as f32) / ((u32::MAX >> 1) as f32)
+    }
+
+    fn filled_state(n: usize) -> PlotState {
+        let mut st = PlotState::new(n);
+        let mut rng = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut energy_ws = 0.0_f64;
+        let mut capacity_as = 0.0_f64;
+        for i in 0..n {
+            let v = 5.0 + lcg_next(&mut rng);
+            let a = 1.0 + lcg_next(&mut rng);
+            let s = Sample {
+                timestamp_ms: (i as u64) * 10,
+                voltage_v: v,
+                current_a: a,
+                power_w: v * a,
+                dp_v: lcg_next(&mut rng),
+                dn_v: lcg_next(&mut rng),
+                temp_c: 25.0 + lcg_next(&mut rng),
+                raw_voltage: 500_000,
+                raw_current: 100_000,
+            };
+            energy_ws += f64::from(s.power_w) * 0.01;
+            capacity_as += f64::from(s.current_a) * 0.01;
+            st.push(&s, energy_ws / 3600.0, capacity_as / 3.6);
+        }
+        st
+    }
+
+    fn run_frames(st: &PlotState, frames: usize) -> std::time::Duration {
+        let cfg = PlotConfig {
+            voltage: true,
+            d_lines: true,
+            current: true,
+            power: true,
+            temperature: true,
+            energy: true,
+            capacity: true,
+        };
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 800.0));
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| st.show(ui, cfg, true));
+            });
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..frames {
+            let input = egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| st.show(ui, cfg, true));
+            });
+            std::hint::black_box(out);
+        }
+        start.elapsed()
+    }
+
+    #[test]
+    #[ignore = "A/B benchmark; run with --release -- --ignored --nocapture"]
+    fn ab_frame_1m() {
+        let st = filled_state(1_000_000);
+        let d = run_frames(&st, 30);
+        println!(
+            "AB_RESULT frame_1m: {:.3} ms/frame",
+            d.as_secs_f64() * 1000.0 / 30.0
+        );
+    }
+
+    #[test]
+    #[ignore = "A/B benchmark; run with --release -- --ignored --nocapture"]
+    fn ab_frame_200k() {
+        let st = filled_state(200_000);
+        let d = run_frames(&st, 100);
+        println!(
+            "AB_RESULT frame_200k: {:.3} ms/frame",
+            d.as_secs_f64() * 1000.0 / 100.0
+        );
+    }
+}
